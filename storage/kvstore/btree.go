@@ -1,45 +1,8 @@
 package kvstore
 
-import "encoding/binary"
-
-// Assert panics with the provided message if the condition is false.
-func assert(condition bool, message string) {
-	if !condition {
-		panic(message)
-	}
-}
-
-/*---- DISK CONSTANTS ---- */
-const TYPE = 2
-const NKEYS = 2
-const HEADER = TYPE + NKEYS
-const POINTER_SIZE = 8
-const OFFSET_SIZE = 2
-const KEY_LENGTH_SIZE = 2
-const VAL_LENGTH_SIZE = 2
-const BTREE_MAX_NODE_SIZE = 4096 //OS page size
-const BTREE_MAX_KEY_SIZE = 1000
-const BTREE_MAX_VAL_SIZE = 3000
-
-const n_keys = 1 // mock
-func init() {
-	nodemax := HEADER +
-		(POINTER_SIZE * n_keys) +
-		(OFFSET_SIZE * n_keys) +
-		(KEY_LENGTH_SIZE+VAL_LENGTH_SIZE)*n_keys +
-		BTREE_MAX_KEY_SIZE + BTREE_MAX_VAL_SIZE
-	assert(nodemax <= BTREE_MAX_NODE_SIZE, "nodemax exceeds BTREE_MAX_NODE_SIZE") // maximum KV
-}
-
-/*----------------*/
-/*---- B-TREE ----*/
-/*----------------*/
-
-type BNode []byte // ? improve
-
-const (
-	BTREE_NODE = 1 // internal nodes
-	BTREE_LEAF = 2 // leaf nodes
+import (
+	"bytes"
+	"encoding/binary"
 )
 
 type BTree struct {
@@ -50,71 +13,72 @@ type BTree struct {
 	del func(uint64)
 }
 
-/* --- HEADER APIs --- */
-func (node BNode) btype() uint16 {
-	return binary.LittleEndian.Uint16(node[0:2])
+// add a new key to a leaf node
+func leafInsert(new BNode, old BNode, idx uint16, key []byte, val []byte) {
+	new.setHeader(BTREE_LEAF, old.nkeys()+1) // setup the header
+	nodeAppendRange(new, old, 0, 0, idx)
+	nodeAppendKV(new, idx, 0, key, val)
+	nodeAppendRange(new, old, idx+1, idx, old.nkeys()-idx)
 }
 
-func (node BNode) nkeys() uint16 {
-	return binary.LittleEndian.Uint16(node[2:4])
-}
-
-func (node BNode) setHeader(btype uint16, nkeys uint16) {
-	binary.LittleEndian.PutUint16(node[0:2], btype)
-	binary.LittleEndian.PutUint16(node[2:4], nkeys)
-}
-
-/* --- POINTERS APIs --- */
-func (node BNode) getPointer(idx uint16) uint64 {
-	assert(idx < node.nkeys(), "idx out of nkeys range")
-	loc := HEADER + POINTER_SIZE*idx
-	return binary.LittleEndian.Uint64(node[loc:])
-}
-
-func (node BNode) setPointer(idx uint16, val uint64) {
-	assert(idx < node.nkeys(), "idx out of nkeys range")
-	loc := HEADER + POINTER_SIZE*idx
-	binary.LittleEndian.PutUint64(node[loc:], val)
-}
-
-/* --- OFFSETS APIs --- */
-func offsetLocation(node BNode, idx uint16) uint16 {
-	assert(1 <= idx && idx < node.nkeys(), "idx out of nkeys range")
-	return HEADER + POINTER_SIZE*node.nkeys() + OFFSET_SIZE*(idx-1)
-}
-
-func (node BNode) getOffset(idx uint16) uint16 {
-	if idx == 0 {
-		return 0
+func nodeLookupLE(node BNode, key []byte) uint16 {
+	nkeys := node.nkeys()
+	found := uint16(0)
+	// skip the first key since it's a copy from the parent
+	for i := uint16(1); i < nkeys; i++ {
+		cmp := bytes.Compare(node.getKey(i), key)
+		if cmp <= 0 {
+			found = i
+		}
+		if cmp >= 0 {
+			break
+		}
 	}
-	return binary.LittleEndian.Uint16(node[offsetLocation(node, idx):])
+	return found
 }
 
-func (node BNode) setOffset(idx uint16, offset uint16) {
-	binary.LittleEndian.PutUint16(node[offsetLocation(node, idx):], offset)
+// copy a KV into its position
+func nodeAppendKV(newNode BNode, idx uint16, ptr uint64, key []byte, val []byte) {
+	newNode.setPointer(idx, ptr)
+	loc := newNode.kvLocation(idx)
+
+	// write values' lentghts
+	binary.LittleEndian.PutUint16(newNode[loc:], uint16(len(key)))
+	binary.LittleEndian.PutUint16(newNode[loc+KEY_LENGTH_SIZE:], uint16(len(val)))
+
+	// write actual values
+	key_value_offset := uint16(KEY_LENGTH_SIZE + VAL_LENGTH_SIZE)
+	val_value_offset := uint16(KEY_LENGTH_SIZE + VAL_LENGTH_SIZE + len(key))
+
+	copy(newNode[loc+key_value_offset:], key)
+	copy(newNode[loc+val_value_offset:], val)
+	newNode.setOffset(idx+1, newNode.getOffset(idx)+KEY_LENGTH_SIZE+VAL_LENGTH_SIZE+uint16((len(key)+len(val))))
 }
 
-/* --- KV APIs --- */
-func (node BNode) kvLocation(idx uint16) uint16 {
-	assert(idx < node.nkeys(), "idx out of nkeys range")
-	return HEADER + POINTER_SIZE*node.nkeys() + OFFSET_SIZE*node.nkeys() + node.getOffset(idx)
-}
+// copy multiple KVs into the position from the old node
+func nodeAppendRange(newNode BNode, oldNode BNode, dstNew uint16, srcOld uint16, n uint16) {
+	assert(srcOld+n <= oldNode.nkeys(), "srcOld+n out of range")
+	assert(dstNew+n <= newNode.nkeys(), "dstNew+n out of range")
 
-func (node BNode) getKey(idx uint16) []byte {
-	assert(idx <= node.nkeys(), "idx out of nkeys range")
-	loc := node.kvLocation(idx)
-	klen := binary.LittleEndian.Uint16(node[loc:])
-	return node[loc+KEY_LENGTH_SIZE+VAL_LENGTH_SIZE:][:klen]
-}
+	if n == 0 {
+		return
+	}
 
-func (node BNode) getVal(idx uint16) []byte {
-	assert(idx < node.nkeys(), "idx out of nkeys range")
-	loc := node.kvLocation(idx)
-	klen := binary.LittleEndian.Uint16(node[loc:])
-	vlen := binary.LittleEndian.Uint16(node[loc+KEY_LENGTH_SIZE:])
-	return node[loc+KEY_LENGTH_SIZE+VAL_LENGTH_SIZE+klen:][:vlen]
-}
+	// update all pointers
+	for i := uint16(0); i < n; i++ {
+		newNode.setPointer(dstNew+i, oldNode.getPointer(srcOld+i))
+	}
 
-func (node BNode) nbytes() uint16 {
-	return node.kvLocation(node.nkeys() - 1)
+	// update all offsets
+	dstBegin := newNode.getOffset(dstNew)
+	srcBegin := oldNode.getOffset(srcOld)
+	for i := uint16(1); i <= n; i++ { // ! NOTE: the range is [1, n]
+		offset := dstBegin + oldNode.getOffset(srcOld+i) - srcBegin
+		newNode.setOffset(dstNew+i, offset)
+	}
+
+	// KVs
+	begin := oldNode.kvLocation(srcOld)
+	end := oldNode.kvLocation(srcOld + n)
+	copy(newNode[newNode.kvLocation(dstNew):], oldNode[begin:end])
 }
