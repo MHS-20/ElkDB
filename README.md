@@ -2,4 +2,7 @@
 
 ElkDB is a distributed database system written from scratch in go.
 
-![DB Logo](elkdb.logo.webp)
+<div align="center">
+<img src="elkdb.logo.webp" alt="DB Logo" width="250">
+</div>
+
