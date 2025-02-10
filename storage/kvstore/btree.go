@@ -32,7 +32,7 @@ func nodeLookupLE(node BNode, key []byte) uint16 {
 
 /*---- BTREE UPDATES -----*/
 
-// Update a Leaf Node (add a new key to a leaf node)
+// Insert a new key into a Leaf Node
 func leafInsert(newNode BNode, oldNode BNode, idx uint16, key []byte, val []byte) {
 	newNode.setHeader(BTREE_LEAF, oldNode.nkeys()+1) // setup the header
 
@@ -44,6 +44,14 @@ func leafInsert(newNode BNode, oldNode BNode, idx uint16, key []byte, val []byte
 
 	// copy the rest of the keys (oldNode[idx:end] -> newNode[idx+1:end+1])
 	nodeAppendRange(newNode, oldNode, idx+1, idx, oldNode.nkeys()-idx)
+}
+
+// Update KV in a Leaf Node
+func leafUpdate(newNode BNode, oldNode BNode, idx uint16, key []byte, val []byte) {
+	newNode.setHeader(BTREE_LEAF, oldNode.nkeys())
+	nodeAppendRange(newNode, oldNode, 0, 0, idx)
+	nodeAppendKV(newNode, idx, 0, key, val)
+	nodeAppendRange(newNode, oldNode, idx+1, idx+1, oldNode.nkeys()-(idx+1))
 }
 
 // copy a KV into its position
@@ -146,3 +154,52 @@ func nodeSplit3(old BNode) (uint16, [3]BNode) {
 }
 
 /*---- BTREE INSERTION ----*/
+// insert a KV into a node,the caller is responsible for:
+// deallocating the input node, splitting and allocating result nodes.
+func treeInsert(tree *BTree, node BNode, key []byte, val []byte) BNode {
+
+	// the result node (allow temporary overflows before splitting)
+	newNode := make(BNode, 2*BTREE_MAX_NODE_SIZE)
+
+	// where to insert the key
+	idx := nodeLookupLE(node, key)
+
+	// act depending on the node type
+	switch node.btype() {
+	case BTREE_LEAF:
+		// leaf, node.getKey(idx) <= key
+		if bytes.Equal(key, node.getKey(idx)) {
+			// found the key, update the value
+			leafUpdate(newNode, node, idx, key, val)
+		} else {
+			// key not found, insert the k-v pair
+			leafInsert(newNode, node, idx+1, key, val)
+		}
+	case BTREE_NODE:
+		// internal node, insert to a child node
+		nodeInsert(tree, newNode, node, idx, key, val)
+
+	default:
+		panic("bad node!")
+	}
+	return newNode
+}
+
+// KV insertion to an internal node
+func nodeInsert(tree *BTree, new BNode, node BNode, idx uint16, key []byte, val []byte) {
+
+	// child pointer
+	kptr := node.getPointer(idx)
+
+	// recursive insertion to the child node
+	knode := treeInsert(tree, tree.get(kptr), key, val)
+
+	// split the result
+	nsplit, split := nodeSplit3(knode)
+
+	// deallocate the child node
+	tree.del(kptr)
+
+	// update the child links
+	nodeReplaceNchild(tree, new, node, idx, split[:nsplit]...)
+}
