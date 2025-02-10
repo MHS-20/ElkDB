@@ -265,36 +265,38 @@ func shouldMerge(tree *BTree, node BNode, idx uint16, updated BNode) (int, BNode
 }
 
 // merge 2 nodes into 1
-func nodeMerge(new BNode, left BNode, right BNode) {
-	new.setHeader(left.btype(), left.nkeys()+right.nkeys())
-	nodeAppendRange(new, left, 0, 0, left.nkeys())
-	nodeAppendRange(new, right, left.nkeys(), 0, right.nkeys())
+func nodeMerge(newNode BNode, left BNode, right BNode) {
+	newNode.setHeader(left.btype(), left.nkeys()+right.nkeys())
+	nodeAppendRange(newNode, left, 0, 0, left.nkeys())
+	nodeAppendRange(newNode, right, left.nkeys(), 0, right.nkeys())
 }
 
 // remove a key from a leaf node
-func leafDelete(new BNode, old BNode, idx uint16) {
-	new.setHeader(BTREE_LEAF, old.nkeys()-1)
-	nodeAppendRange(new, old, 0, 0, idx)
-	nodeAppendRange(new, old, idx, idx+1, old.nkeys()-idx-1)
+func leafDelete(newNode BNode, oldNode BNode, idx uint16) {
+	newNode.setHeader(BTREE_LEAF, oldNode.nkeys()-1)
+	nodeAppendRange(newNode, oldNode, 0, 0, idx)
+	nodeAppendRange(newNode, oldNode, idx, idx+1, oldNode.nkeys()-idx-1)
 }
 
 // replace 2 adjacent links with 1
-func nodeReplace2Child(new BNode, old BNode, idx uint16, ptr uint64, key []byte) {
-	new.setHeader(old.btype(), old.nkeys()-1)
-	nodeAppendRange(new, old, 0, 0, idx)
-	nodeAppendKV(new, idx, 0, key, nil)
-	nodeAppendRange(new, old, idx+1, idx+2, old.nkeys()-idx-1)
+func nodeReplace2Child(newNode BNode, oldNode BNode, idx uint16, ptr uint64, key []byte) {
+	newNode.setHeader(oldNode.btype(), oldNode.nkeys()-1)
+	nodeAppendRange(newNode, oldNode, 0, 0, idx)
+	nodeAppendKV(newNode, idx, ptr, key, nil)
+	nodeAppendRange(newNode, oldNode, idx+1, idx+2, oldNode.nkeys()-idx-1)
+	// idx+2 to skip the key we want to remove
 }
 
 // delete a key from the tree
 func treeDelete(tree *BTree, node BNode, key []byte) BNode {
 	idx := nodeLookupLE(node, key)
+
 	switch node.btype() {
 	case BTREE_LEAF:
 		if idx < node.nkeys() && bytes.Equal(key, node.getKey(idx)) {
-			new := make(BNode, BTREE_MAX_NODE_SIZE)
-			leafDelete(new, node, idx)
-			return new
+			newNode := make(BNode, BTREE_MAX_NODE_SIZE)
+			leafDelete(newNode, node, idx)
+			return newNode
 		}
 		return BNode{} // not found
 	case BTREE_NODE:
@@ -306,6 +308,7 @@ func treeDelete(tree *BTree, node BNode, key []byte) BNode {
 
 		new := make(BNode, BTREE_MAX_NODE_SIZE)
 		mergeDir, sibling := shouldMerge(tree, node, idx, updated)
+
 		switch {
 		case mergeDir < 0: // left
 			merged := make(BNode, BTREE_MAX_NODE_SIZE)
