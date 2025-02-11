@@ -3,6 +3,7 @@ package kvstore
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 )
 
 type BTree struct {
@@ -118,7 +119,8 @@ func nodeReplaceNchild(tree *BTree, newNode BNode, oldNode BNode, idx uint16, ch
 }
 
 /*---- BTREE SPLITS -----*/
-// ! just in memory split, save to disk
+// ! just in memory split
+// TODO: save to disk
 func nodeSplit2(left BNode, right BNode, old BNode) {
 	mid := old.nkeys() / 2
 
@@ -207,11 +209,14 @@ func nodeInsert(tree *BTree, new BNode, node BNode, idx uint16, key []byte, val 
 func (tree *BTree) Insert(key []byte, val []byte) {
 	if tree.root == 0 {
 		// create the first node
+		fmt.Println("Initializing the first node")
 		root := make(BNode, BTREE_MAX_NODE_SIZE)
 		root.setHeader(BTREE_LEAF, 2)
 
 		// a dummy key, ensure the tree has always a key
 		nodeAppendKV(root, 0, 0, nil, nil)
+
+		// add actual key-value
 		nodeAppendKV(root, 1, 0, key, val)
 		tree.root = tree.new(root)
 		return
@@ -240,7 +245,7 @@ func (tree *BTree) Insert(key []byte, val []byte) {
 // should the updated child be merged with a sibling?
 // left (-1)
 // right (+1)
-// 0 if no merge is required.
+// 0 no merge required
 func shouldMerge(tree *BTree, node BNode, idx uint16, updated BNode) (int, BNode) {
 	if updated.nbytes() > BTREE_MAX_NODE_SIZE/4 {
 		return 0, BNode{}
