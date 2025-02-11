@@ -305,33 +305,7 @@ func treeDelete(tree *BTree, node BNode, key []byte) BNode {
 		}
 		return BNode{} // not found
 	case BTREE_NODE:
-		kptr := node.getPointer(idx)
-		updated := treeDelete(tree, tree.get(kptr), key)
-		if len(updated) == 0 {
-			return BNode{} // not found
-		}
-
-		new := make(BNode, BTREE_MAX_NODE_SIZE)
-		mergeDir, sibling := shouldMerge(tree, node, idx, updated)
-
-		switch {
-		case mergeDir < 0: // left
-			merged := make(BNode, BTREE_MAX_NODE_SIZE)
-			nodeMerge(merged, sibling, updated)
-			tree.del(node.getPointer(idx - 1))
-			nodeReplace2Child(new, node, idx-1, tree.new(merged), merged.getKey(0))
-		case mergeDir > 0: // right
-			merged := make(BNode, BTREE_MAX_NODE_SIZE)
-			nodeMerge(merged, updated, sibling)
-			tree.del(node.getPointer(idx + 1))
-			nodeReplace2Child(new, node, idx, tree.new(merged), merged.getKey(0))
-		case mergeDir == 0 && updated.nkeys() == 0:
-			assert(node.nkeys() == 1 && idx == 0, "one empty child but no sibling")
-			new.setHeader(BTREE_NODE, 0) // the parent becomes empty too
-		case mergeDir == 0 && updated.nkeys() > 0: // no merge
-			nodeReplaceNchild(tree, new, node, idx, updated)
-		}
-		return new
+		return nodeDelete(tree, node, idx, key)
 	default:
 		panic("bad node!")
 	}
@@ -348,18 +322,18 @@ func nodeDelete(tree *BTree, node BNode, idx uint16, key []byte) BNode {
 	}
 
 	tree.del(kptr)
-	new := BNode(make([]byte, BTREE_MAX_NODE_SIZE))
+	new := make(BNode, BTREE_MAX_NODE_SIZE)
 
 	// check for merging
 	mergeDir, sibling := shouldMerge(tree, node, idx, updated)
 	switch {
 	case mergeDir < 0: // left
-		merged := BNode(make([]byte, BTREE_MAX_NODE_SIZE))
+		merged := make(BNode, BTREE_MAX_NODE_SIZE)
 		nodeMerge(merged, sibling, updated)
 		tree.del(node.getPointer(idx - 1))
 		nodeReplace2Child(new, node, idx-1, tree.new(merged), merged.getKey(0))
 	case mergeDir > 0: // right
-		merged := BNode(make([]byte, BTREE_MAX_NODE_SIZE))
+		merged := make(BNode, BTREE_MAX_NODE_SIZE)
 		nodeMerge(merged, updated, sibling)
 		tree.del(node.getPointer(idx + 1))
 		nodeReplace2Child(new, node, idx, tree.new(merged), merged.getKey(0))
