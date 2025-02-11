@@ -2,6 +2,8 @@ package kvstore
 
 import (
 	"encoding/binary"
+	"fmt"
+	"strconv"
 )
 
 // Assert panics with the provided message if the condition is false.
@@ -13,7 +15,7 @@ func assert(condition bool, message string) {
 
 /*---- DISK CONSTANTS ---- */
 const TYPE = 2
-const NKEYS = 2
+const NKEYS = 5
 const HEADER = TYPE + NKEYS
 const POINTER_SIZE = 8
 const OFFSET_SIZE = 2
@@ -23,7 +25,7 @@ const BTREE_MAX_NODE_SIZE = 4096 //OS page size
 const BTREE_MAX_KEY_SIZE = 1000
 const BTREE_MAX_VAL_SIZE = 3000
 
-const n_keys = 1 // mock
+const n_keys = 5 // mock
 func init() {
 	nodemax := HEADER +
 		(POINTER_SIZE * n_keys) +
@@ -60,20 +62,22 @@ func (node BNode) setHeader(btype uint16, nkeys uint16) {
 
 /* --- POINTERS APIs --- */
 func (node BNode) getPointer(idx uint16) uint64 {
-	assert(idx < node.nkeys(), "idx out of nkeys range")
+	fmt.Println("node.nkeys(): ", node.nkeys())
+	fmt.Println("idx: ", idx)
+	assert(idx < node.nkeys(), "idx out of nkeys range: "+strconv.Itoa(int(idx))+" "+strconv.Itoa(int(node.nkeys())))
 	loc := HEADER + POINTER_SIZE*idx
 	return binary.LittleEndian.Uint64(node[loc:])
 }
 
 func (node BNode) setPointer(idx uint16, val uint64) {
-	assert(idx < node.nkeys(), "idx out of nkeys range")
+	assert(idx < node.nkeys(), "idx out of nkeys range: "+strconv.Itoa(int(idx))+" "+strconv.Itoa(int(node.nkeys())))
 	loc := HEADER + POINTER_SIZE*idx
 	binary.LittleEndian.PutUint64(node[loc:], val)
 }
 
 /* --- OFFSETS APIs --- */
 func offsetLocation(node BNode, idx uint16) uint16 {
-	assert(1 <= idx && idx < node.nkeys(), "idx out of nkeys range")
+	assert(1 <= idx && idx < node.nkeys(), "idx out of nkeys range "+strconv.Itoa(int(idx))+" "+strconv.Itoa(int(node.nkeys())))
 	return HEADER + POINTER_SIZE*node.nkeys() + OFFSET_SIZE*(idx-1)
 }
 
@@ -90,19 +94,19 @@ func (node BNode) setOffset(idx uint16, offset uint16) {
 
 /* --- KV APIs --- */
 func (node BNode) kvLocation(idx uint16) uint16 {
-	assert(idx < node.nkeys(), "idx out of nkeys range")
+	assert(idx < node.nkeys(), "idx out of nkeys range: "+strconv.Itoa(int(idx))+" "+strconv.Itoa(int(node.nkeys())))
 	return HEADER + POINTER_SIZE*node.nkeys() + OFFSET_SIZE*node.nkeys() + node.getOffset(idx)
 }
 
 func (node BNode) getKey(idx uint16) []byte {
-	assert(idx <= node.nkeys(), "idx out of nkeys range")
+	assert(idx <= node.nkeys(), "idx out of nkeys range: "+strconv.Itoa(int(idx))+" "+strconv.Itoa(int(node.nkeys())))
 	loc := node.kvLocation(idx)
 	klen := binary.LittleEndian.Uint16(node[loc:])
 	return node[loc+KEY_LENGTH_SIZE+VAL_LENGTH_SIZE:][:klen]
 }
 
 func (node BNode) getVal(idx uint16) []byte {
-	assert(idx < node.nkeys(), "idx out of nkeys range")
+	assert(idx < node.nkeys(), "idx out of nkeys range: "+strconv.Itoa(int(idx))+" "+strconv.Itoa(int(node.nkeys())))
 	loc := node.kvLocation(idx)
 	klen := binary.LittleEndian.Uint16(node[loc:])
 	vlen := binary.LittleEndian.Uint16(node[loc+KEY_LENGTH_SIZE:])
