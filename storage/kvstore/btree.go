@@ -3,14 +3,13 @@ package kvstore
 import (
 	"bytes"
 	"encoding/binary"
-	"fmt"
 )
 
 type BTree struct {
-	root uint64
+	root uint64 // pointer
 	// managing on-disk pages
-	get func(uint64) []byte
-	new func([]byte) uint64
+	get func(uint64) BNode
+	new func(BNode) uint64
 	del func(uint64)
 }
 
@@ -32,11 +31,9 @@ func nodeLookupLE(node BNode, key []byte) uint16 {
 }
 
 /*---- BTREE UPDATES -----*/
-
 // Insert a new key into a Leaf Node
 func leafInsert(newNode BNode, oldNode BNode, idx uint16, key []byte, val []byte) {
 	newNode.setHeader(BTREE_LEAF, oldNode.nkeys()+1) // setup the header
-
 	// copy existing node keys (oldNode[0:idx] -> newNode[0:idx]
 	nodeAppendRange(newNode, oldNode, 0, 0, idx)
 
@@ -90,9 +87,10 @@ func nodeAppendRange(newNode BNode, oldNode BNode, dstNew uint16, srcOld uint16,
 	// update all offsets
 	dstBegin := newNode.getOffset(dstNew)
 	srcBegin := oldNode.getOffset(srcOld)
-	for i := uint16(1); i <= n; i++ { // the range is [1, n]
+
+	for i := uint16(1); i <= n; i++ {
 		// relative distance in the old node
-		offset := dstBegin + (oldNode.getOffset(srcOld+i) - srcBegin)
+		offset := dstBegin + oldNode.getOffset(srcOld+i) - srcBegin
 		newNode.setOffset(dstNew+i, offset)
 	}
 
@@ -105,6 +103,15 @@ func nodeAppendRange(newNode BNode, oldNode BNode, dstNew uint16, srcOld uint16,
 // Update an Internal Node (replace a link with multiple links)
 func nodeReplaceNchild(tree *BTree, newNode BNode, oldNode BNode, idx uint16, childs ...BNode) {
 	inc := uint16(len(childs))
+
+	// optimizing common case
+	if inc == 1 && bytes.Equal(childs[0].getKey(0), oldNode.getKey(idx)) {
+		copy(newNode, oldNode[:oldNode.nbytes()])
+		newNode.setPointer(idx, tree.new(childs[0]))
+		return
+	}
+
+	// general case, less efficient
 	newNode.setHeader(BTREE_NODE, oldNode.nkeys()+inc-1)
 	nodeAppendRange(newNode, oldNode, 0, 0, idx)
 
@@ -119,17 +126,54 @@ func nodeReplaceNchild(tree *BTree, newNode BNode, oldNode BNode, idx uint16, ch
 }
 
 /*---- BTREE SPLITS -----*/
-// ! just in memory split
-// TODO: save to disk
+
 func nodeSplit2(left BNode, right BNode, old BNode) {
-	mid := old.nkeys() / 2
+	assert(old.nkeys() >= 2, "nodeSplit2: nkeys < 2")
 
-	left.setHeader(old.btype(), mid)
-	nodeAppendRange(left, old, 0, 0, mid)
+	// the initial guess
+	nleft := old.nkeys() / 2
 
-	right.setHeader(old.btype(), old.nkeys()-mid)
-	nodeAppendRange(right, old, 0, mid, old.nkeys()-mid)
+	// try to fit the left half
+	left_bytes := func() uint16 {
+		return HEADER + 8*nleft + 2*nleft + old.getOffset(nleft)
+	}
+
+	for left_bytes() > BTREE_MAX_NODE_SIZE {
+		nleft--
+	}
+
+	assert(nleft >= 1, "nodeSplit2: nleft < 1")
+
+	// try to fit the right half
+	right_bytes := func() uint16 {
+		return old.nbytes() - left_bytes() + HEADER
+	}
+
+	for right_bytes() > BTREE_MAX_NODE_SIZE {
+		nleft++
+	}
+
+	assert(nleft < old.nkeys(), "nodeSplit2: nleft >= nkeys")
+	nright := old.nkeys() - nleft
+
+	left.setHeader(old.btype(), nleft)
+	right.setHeader(old.btype(), nright)
+	nodeAppendRange(left, old, 0, 0, nleft)
+	nodeAppendRange(right, old, 0, nleft, nright)
+	// the left half may be still too big
+	assert(right.nbytes() <= BTREE_MAX_NODE_SIZE, "nodeSplit2: right node is too large")
 }
+
+// func nodeSplit2(left BNode, right BNode, old BNode) {
+// 	assert(old.nkeys() >= 2, "nodeSplit2: nkeys < 2")
+// 	mid := old.nkeys() / 2
+
+// 	left.setHeader(old.btype(), mid)
+// 	nodeAppendRange(left, old, 0, 0, mid)
+
+// 	right.setHeader(old.btype(), old.nkeys()-mid)
+// 	nodeAppendRange(right, old, 0, mid, old.nkeys()-mid)
+// }
 
 // split a node if it's too big. the results are 1~3 nodes.
 func nodeSplit3(old BNode) (uint16, [3]BNode) {
@@ -145,14 +189,14 @@ func nodeSplit3(old BNode) (uint16, [3]BNode) {
 	if left.nbytes() <= BTREE_MAX_NODE_SIZE {
 		left = left[:BTREE_MAX_NODE_SIZE]
 		return 2, [3]BNode{left, right}
+	} else {
+		// the left node is still too large
+		leftleft := make(BNode, BTREE_MAX_NODE_SIZE)
+		middle := make(BNode, BTREE_MAX_NODE_SIZE)
+		nodeSplit2(leftleft, middle, left)
+		assert(leftleft.nbytes() <= BTREE_MAX_NODE_SIZE, "leftleft is too large")
+		return 3, [3]BNode{leftleft, middle, right}
 	}
-
-	// the left node is still too large
-	leftleft := make(BNode, BTREE_MAX_NODE_SIZE)
-	middle := make(BNode, BTREE_MAX_NODE_SIZE)
-	nodeSplit2(leftleft, middle, left)
-	assert(leftleft.nbytes() <= BTREE_MAX_NODE_SIZE, "leftleft is too large")
-	return 3, [3]BNode{leftleft, middle, right}
 }
 
 /*---- BTREE INSERTION ----*/
@@ -180,7 +224,6 @@ func treeInsert(tree *BTree, node BNode, key []byte, val []byte) BNode {
 	case BTREE_NODE:
 		// internal node, insert to a child node
 		nodeInsert(tree, newNode, node, idx, key, val)
-
 	default:
 		panic("bad node!")
 	}
@@ -188,7 +231,7 @@ func treeInsert(tree *BTree, node BNode, key []byte, val []byte) BNode {
 }
 
 // KV insertion to an internal node
-func nodeInsert(tree *BTree, new BNode, node BNode, idx uint16, key []byte, val []byte) {
+func nodeInsert(tree *BTree, newNode BNode, node BNode, idx uint16, key []byte, val []byte) {
 	// child pointer
 	kptr := node.getPointer(idx)
 
@@ -202,18 +245,21 @@ func nodeInsert(tree *BTree, new BNode, node BNode, idx uint16, key []byte, val 
 	tree.del(kptr)
 
 	// update the child links
-	nodeReplaceNchild(tree, new, node, idx, split[:nsplit]...)
+	nodeReplaceNchild(tree, newNode, node, idx, split[:nsplit]...)
 }
 
 /*--- BTREE KV-STORE INTERFACE ---*/
 func (tree *BTree) Insert(key []byte, val []byte) {
+	assert(len(key) != 0, "inserting empty key")
+	assert(len(key) <= BTREE_MAX_KEY_SIZE, "key size exceeds BTREE_MAX_KEY_SIZE")
+	assert(len(val) <= BTREE_MAX_VAL_SIZE, "val size exceeds BTREE_MAX_VAL_SIZE")
+
 	if tree.root == 0 {
 		// create the first node
-		fmt.Println("Initializing the first node")
 		root := make(BNode, BTREE_MAX_NODE_SIZE)
-		root.setHeader(BTREE_LEAF, 2)
+		root.setHeader(BTREE_LEAF, n_keys)
 
-		// a dummy key, ensure the tree has always a key
+		// dummy key ensure the tree has always a key
 		nodeAppendKV(root, 0, 0, nil, nil)
 
 		// add actual key-value
@@ -274,13 +320,15 @@ func nodeMerge(newNode BNode, left BNode, right BNode) {
 	newNode.setHeader(left.btype(), left.nkeys()+right.nkeys())
 	nodeAppendRange(newNode, left, 0, 0, left.nkeys())
 	nodeAppendRange(newNode, right, left.nkeys(), 0, right.nkeys())
+	assert(newNode.nbytes() <= BTREE_MAX_NODE_SIZE, "nodeMerge: merged node is too large")
+
 }
 
 // remove a key from a leaf node
 func leafDelete(newNode BNode, oldNode BNode, idx uint16) {
 	newNode.setHeader(BTREE_LEAF, oldNode.nkeys()-1)
 	nodeAppendRange(newNode, oldNode, 0, 0, idx)
-	nodeAppendRange(newNode, oldNode, idx, idx+1, oldNode.nkeys()-idx-1)
+	nodeAppendRange(newNode, oldNode, idx, idx+1, oldNode.nkeys()-(idx+1))
 }
 
 // replace 2 adjacent links with 1
@@ -288,7 +336,7 @@ func nodeReplace2Child(newNode BNode, oldNode BNode, idx uint16, ptr uint64, key
 	newNode.setHeader(oldNode.btype(), oldNode.nkeys()-1)
 	nodeAppendRange(newNode, oldNode, 0, 0, idx)
 	nodeAppendKV(newNode, idx, ptr, key, nil)
-	nodeAppendRange(newNode, oldNode, idx+1, idx+2, oldNode.nkeys()-idx-1)
+	nodeAppendRange(newNode, oldNode, idx+1, idx+2, oldNode.nkeys()-(idx+2))
 	// idx+2 to skip the key we want to remove
 }
 
@@ -311,7 +359,7 @@ func treeDelete(tree *BTree, node BNode, key []byte) BNode {
 	}
 }
 
-// delete a key from an internal node; part of the treeDelete()
+// delete a key from an internal node
 func nodeDelete(tree *BTree, node BNode, idx uint16, key []byte) BNode {
 	// recurse into the kid
 	kptr := node.getPointer(idx)
@@ -348,6 +396,8 @@ func nodeDelete(tree *BTree, node BNode, idx uint16, key []byte) BNode {
 
 // delete a key and returns whether the key was there
 func (tree *BTree) Delete(key []byte) bool {
+	assert(len(key) != 0, "deleting empty key")
+	assert(len(key) <= BTREE_MAX_KEY_SIZE, "deleting overflowing key")
 	if tree.root == 0 {
 		return false
 	}
@@ -357,10 +407,19 @@ func (tree *BTree) Delete(key []byte) bool {
 		return false
 	}
 
-	if node.nkeys() == 0 {
-		tree.root = 0
+	tree.del(tree.root)
+	if node.btype() == BTREE_NODE && node.nkeys() == 1 {
+		// remove a level
+		tree.root = node.getPointer(0)
 	} else {
 		tree.root = tree.new(node)
 	}
 	return true
+
+	// if node.nkeys() == 0 {
+	// 	tree.root = 0
+	// } else {
+	// 	tree.root = tree.new(node)
+	// }
+	// return true
 }
