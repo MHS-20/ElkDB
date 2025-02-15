@@ -89,16 +89,16 @@ type sortIF struct {
 	swap func(i, j int)
 }
 
-func (self sortIF) Len() int {
-	return self.len
+func (s sortIF) Len() int {
+	return s.len
 }
 
-func (self sortIF) Less(i, j int) bool {
-	return self.less(i, j)
+func (s sortIF) Less(i, j int) bool {
+	return s.less(i, j)
 }
 
-func (self sortIF) Swap(i, j int) {
-	self.swap(i, j)
+func (s sortIF) Swap(i, j int) {
+	s.swap(i, j)
 }
 
 func (tt *TreeTester) verify(t *testing.T) {
