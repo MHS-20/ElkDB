@@ -164,17 +164,6 @@ func nodeSplit2(left BNode, right BNode, old BNode) {
 	assert(right.nbytes() <= BTREE_MAX_NODE_SIZE, "nodeSplit2: right node is too large")
 }
 
-// func nodeSplit2(left BNode, right BNode, old BNode) {
-// 	assert(old.nkeys() >= 2, "nodeSplit2: nkeys < 2")
-// 	mid := old.nkeys() / 2
-
-// 	left.setHeader(old.btype(), mid)
-// 	nodeAppendRange(left, old, 0, 0, mid)
-
-// 	right.setHeader(old.btype(), old.nkeys()-mid)
-// 	nodeAppendRange(right, old, 0, mid, old.nkeys()-mid)
-// }
-
 // split a node if it's too big. the results are 1~3 nodes.
 func nodeSplit3(old BNode) (uint16, [3]BNode) {
 	if old.nbytes() <= BTREE_MAX_NODE_SIZE {
