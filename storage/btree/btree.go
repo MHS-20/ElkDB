@@ -13,6 +13,30 @@ type BTree struct {
 	del func(uint64)
 }
 
+func (tree *BTree) Get(key []byte) ([]byte, bool) {
+	if tree.root == 0 {
+		return nil, false
+	}
+
+	return nodeGetKey(tree, tree.get(tree.root), key)
+}
+
+func nodeGetKey(tree *BTree, node BNode, key []byte) ([]byte, bool) {
+	idx := nodeLookupLE(node, key)
+	switch node.btype() {
+	case BTREE_LEAF:
+		if bytes.Equal(key, node.getKey(idx)) {
+			return node.getVal(idx), true
+		} else {
+			return nil, false
+		}
+	case BTREE_NODE:
+		return nodeGetKey(tree, tree.get(node.getPointer(idx)), key)
+	default:
+		panic("bad node!")
+	}
+}
+
 // search key
 func nodeLookupLE(node BNode, key []byte) uint16 {
 	nkeys := node.nkeys()
