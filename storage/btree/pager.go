@@ -14,9 +14,9 @@ const DB_SIG_SIZE = 16
 const METAPAGE_SIZE = 32
 const INITIAL_MMAP_SIZE = 64 << 20 // 64MB
 
-// chunk = portion of the db mapped in memory
-// chuck = collection of pages
 // bnode = page
+// chuck = collection of pages
+// chunk = portion of the db mapped in memory
 
 type KV struct {
 	Path string
@@ -29,9 +29,9 @@ type KV struct {
 	}
 
 	mmap struct {
-		file   int      // file size
-		total  int      // mmap size
-		chunks [][]byte // multiple mmaps (non-continuous)
+		file_size int      // file size
+		mmap_size int      // mmap size
+		chunks    [][]byte // multiple mmaps (non-continuous)
 	}
 }
 
@@ -71,13 +71,13 @@ func (db *KV) Open() error {
 	}
 	db.fp = fp
 
-	sz, chunk, err := mmapInit(db.fp)
+	size, chunk, err := mmapInit(db.fp)
 	if err != nil {
 		goto fail
 	}
 
-	db.mmap.file = sz
-	db.mmap.total = len(chunk)
+	db.mmap.file_size = size
+	db.mmap.mmap_size = len(chunk)
 	db.mmap.chunks = [][]byte{chunk}
 
 	// btree callbacks
@@ -160,7 +160,7 @@ func mmapInit(fp *os.File) (int, []byte, error) {
 /*------- META-PAGE MANAGEMENT --------*/
 func metapageLoad(db *KV) error {
 	// empty file, first write will create the metapage
-	if db.mmap.file == 0 {
+	if db.mmap.file_size == 0 {
 		db.page.flushed = 1 // reserved for the metapage
 		return nil
 	}
@@ -174,7 +174,7 @@ func metapageLoad(db *KV) error {
 		return errors.New("bad signature")
 	}
 
-	bad := !(1 <= used && used <= uint64(db.mmap.file/BTREE_MAX_NODE_SIZE))
+	bad := !(1 <= used && used <= uint64(db.mmap.file_size/BTREE_MAX_NODE_SIZE))
 	bad = bad || !(0 <= root && root < used)
 	if bad {
 		return errors.New("bad meta page")
@@ -202,7 +202,7 @@ func metapageStore(db *KV) error {
 
 // Extend file exponentially
 func extendFile(db *KV, npages int) error {
-	filePages := db.mmap.file / BTREE_MAX_NODE_SIZE
+	filePages := db.mmap.file_size / BTREE_MAX_NODE_SIZE
 	if filePages >= npages {
 		return nil
 	}
@@ -223,18 +223,18 @@ func extendFile(db *KV, npages int) error {
 		return fmt.Errorf("fallocate: %w", err)
 	}
 
-	db.mmap.file = fileSize
+	db.mmap.file_size = fileSize
 	return nil
 }
 
 // Add new mappings
 func extendMmap(db *KV, npages int) error {
-	if db.mmap.total >= npages*BTREE_MAX_NODE_SIZE {
+	if db.mmap.mmap_size >= npages*BTREE_MAX_NODE_SIZE {
 		return nil
 	}
 
 	chunk, err := syscall.Mmap(
-		int(db.fp.Fd()), int64(db.mmap.total), db.mmap.total,
+		int(db.fp.Fd()), int64(db.mmap.mmap_size), db.mmap.mmap_size,
 		syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED,
 	)
 
@@ -242,7 +242,7 @@ func extendMmap(db *KV, npages int) error {
 		return fmt.Errorf("mmap: %w", err)
 	}
 
-	db.mmap.total += db.mmap.total
+	db.mmap.mmap_size += db.mmap.mmap_size
 	db.mmap.chunks = append(db.mmap.chunks, chunk)
 	return nil
 }
