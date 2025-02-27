@@ -27,15 +27,12 @@ func newPagerTester() *PagerTester {
 }
 
 func (pt *PagerTester) dispose() {
-	fmt.Println("Disposing")
 	pt.db.Close()
 	os.Remove("test.db")
 }
 
 func (pt *PagerTester) add(key string, val string) {
-	fmt.Println("Adding key: ", key)
 	pt.db.Set([]byte(key), []byte(val))
-	fmt.Println("Added key: ", key)
 	pt.ref[key] = val
 }
 
@@ -100,9 +97,11 @@ func (pt *PagerTester) verify(t *testing.T) {
 	nodeVerify = func(node BNode) {
 		nkeys := node.nkeys()
 		assert(nkeys >= 1, "nkeys < 1")
+
 		if node.btype() == BTREE_LEAF {
 			return
 		}
+
 		for i := uint16(0); i < nkeys; i++ {
 			key := node.getKey(i)
 			kid := pt.db.tree.get(node.getPointer(i))
@@ -120,19 +119,17 @@ func TestKVBasic(t *testing.T) {
 
 	pt.add("k", "v")
 	pt.verify(t)
-	fmt.Println("KVBASIC: Inserting")
 
 	// insert
 	for i := 0; i < 25; i++ {
-		fmt.Println("Inserted key: ", i)
 		key := fmt.Sprintf("key%d", fmix32(uint32(i)))
 		val := fmt.Sprintf("vvv%d", fmix32(uint32(-i)))
 		pt.add(key, val)
 		pt.verify(t)
 
-		// if i < 200 {
-		// 	pt.verify(t)
-		// }
+		if i < 20 {
+			pt.verify(t)
+		}
 	}
 
 	pt.verify(t)
@@ -205,15 +202,8 @@ func TestKVIncLength(t *testing.T) {
 		val := make([]byte, vlen)
 
 		factor := BTREE_MAX_NODE_SIZE / l
-		size := factor * factor * 2
-
-		if size > 40 {
-			size = 40
-		}
-
-		if size < 10 {
-			size = 10
-		}
+		size := min(factor*factor*2, 40)
+		size = max(size, 10)
 
 		for i := 0; i < size; i++ {
 			rand.Read(key)
