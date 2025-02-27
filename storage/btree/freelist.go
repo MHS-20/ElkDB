@@ -17,12 +17,12 @@ const NEXT_LENGTH = 8
 const FREE_LIST_HEADER = TYPE_LENGTH + SIZE_LENGTH + TOTAL_LENGTH + NEXT_LENGTH
 const FREE_LIST_CAP = (BTREE_MAX_NODE_SIZE - FREE_LIST_HEADER) / 8
 
-func (fl *FreeList) Total() int {
+func (fl *FreeList) ListLen() int {
 	if fl.head == 0 {
 		return 0
 	}
 	node := fl.get(fl.head)
-	return int(binary.LittleEndian.Uint64(node[HEADER:]))
+	return int(binary.LittleEndian.Uint64(node[TYPE_LENGTH+SIZE_LENGTH:]))
 }
 
 func freeListNodeSize(node BNode) int {
@@ -53,4 +53,87 @@ func freeListNodeSetHeader(node BNode, size uint16, next uint64) {
 
 func freeListNodeSetTotal(node BNode, total uint64) {
 	binary.LittleEndian.PutUint64(node[TYPE_LENGTH+SIZE_LENGTH:], total)
+}
+
+// get a page from the free list
+func (fl *FreeList) Get(topn int) uint64 {
+	assert(0 <= topn && topn < fl.ListLen(), "topn out of range")
+	node := fl.get(fl.head)
+
+	for freeListNodeSize(node) <= topn {
+		topn -= freeListNodeSize(node)
+		next := freeListNext(node)
+		assert(next != 0, "node is tail")
+		node = fl.get(next)
+	}
+	return freelistNodePointer(node, freeListNodeSize(node)-topn-1)
+}
+
+// remove `popn` pointers and add some new pointers
+func (fl *FreeList) Update(popn int, freed []uint64) {
+	assert(popn <= fl.ListLen(), "popn out of range")
+	if popn == 0 && len(freed) == 0 {
+		return
+	}
+
+	// construct the new list
+	total := fl.ListLen()
+	reuse := []uint64{}
+
+	for fl.head != 0 && len(reuse)*FREE_LIST_CAP < len(freed) {
+		node := fl.get(fl.head)
+		freed = append(freed, fl.head) // recyle the node itself
+
+		if popn >= freeListNodeSize(node) {
+			// remove all pointers in this node
+			popn -= freeListNodeSize(node)
+		} else {
+			// remove some pointers
+			remain := freeListNodeSize(node) - popn
+			popn = 0
+
+			// reuse pointers from the free list itself
+			for remain > 0 && len(reuse)*FREE_LIST_CAP < len(freed)+remain {
+				remain--
+				reuse = append(reuse, freelistNodePointer(node, remain))
+			}
+
+			// move the node into the `freed` list
+			for i := range remain {
+				freed = append(freed, freelistNodePointer(node, i))
+			}
+		}
+
+		// discard the node and move to the next node
+		total -= freeListNodeSize(node)
+		fl.head = freeListNext(node)
+	}
+
+	assert(len(reuse)*FREE_LIST_CAP >= len(freed) || fl.head == 0, "no enough free list nodes")
+	freeListPush(fl, freed, reuse)
+	freeListNodeSetTotal(fl.get(fl.head), uint64(total+len(freed)))
+}
+
+func freeListPush(fl *FreeList, freed []uint64, reuse []uint64) {
+	for len(freed) > 0 {
+		newNode := make(BNode, BTREE_MAX_NODE_SIZE)
+		size := min(len(freed), FREE_LIST_CAP)
+		freeListNodeSetHeader(newNode, uint16(size), fl.head)
+
+		for i, pointer := range freed[:size] {
+			freeListNodeSetPointer(newNode, i, pointer)
+		}
+
+		freed = freed[size:]
+
+		if len(reuse) > 0 {
+			// reuse pointer from the list
+			fl.head, reuse = reuse[0], reuse[1:]
+			fl.use(fl.head, newNode)
+		} else {
+			// append a page for the new node
+			fl.head = fl.new(newNode)
+		}
+	}
+	assert(len(reuse) == 0, "no enough free list nodes")
 }
