@@ -20,49 +20,45 @@ const INITIAL_MMAP_SIZE = 64 << 20 // 64MB
 
 type KV struct {
 	Path string
+	// internals
 	fp   *os.File
 	tree BTree
 
 	page struct {
-		flushed uint64   // database size in pages
+		flushed uint64   // database size in number of pages
 		temp    [][]byte // newly allocated pages
 	}
 
 	mmap struct {
-		file_size int      // file size
-		mmap_size int      // mmap size
-		chunks    [][]byte // multiple mmaps (non-continuous)
+		file_size int      // file size, can be larger than the database size
+		mmap_size int      // mmap size, can be larger than the file size
+		chunks    [][]byte // multiple mmaps, can be non-continuous
 	}
 }
 
-/*------- PAGER API ------*/
-// read key from DB
+/*----- PAGER API -----*/
 func (db *KV) Get(key []byte) ([]byte, bool) {
 	return db.tree.Get(key)
 }
 
-// update DB key-val
 func (db *KV) Set(key []byte, val []byte) error {
 	db.tree.Insert(key, val)
 	return flushPages(db)
 }
 
-// delete key from DB
 func (db *KV) Del(key []byte) (bool, error) {
 	deleted := db.tree.Delete(key)
 	return deleted, flushPages(db)
 }
 
-// DELETE DB
 func (db *KV) Close() {
 	for _, chunk := range db.mmap.chunks {
 		err := syscall.Munmap(chunk)
-		assert(err == nil, "err "+err.Error())
+		assert(err == nil, " ")
 	}
 	_ = db.fp.Close()
 }
 
-// CREATE DB
 func (db *KV) Open() error {
 	// open or create the DB file
 	fp, err := os.OpenFile(db.Path, os.O_RDWR|os.O_CREATE, 0644)
@@ -71,64 +67,59 @@ func (db *KV) Open() error {
 	}
 	db.fp = fp
 
+	// create the initial mmap
 	size, chunk, err := mmapInit(db.fp)
 	if err != nil {
-		goto fail
+		db.Close()
+		return fmt.Errorf("KV.Open: %w", err)
 	}
 
 	db.mmap.file_size = size
 	db.mmap.mmap_size = len(chunk)
 	db.mmap.chunks = [][]byte{chunk}
 
-	// btree callbacks
 	db.tree.get = db.pageGet
 	db.tree.new = db.pageNew
 	db.tree.del = db.pageDel
 
-	// read the master page
-	err = metapageLoad(db)
+	err = loadMetapage(db)
 	if err != nil {
-		goto fail
+		db.Close()
+		return fmt.Errorf("KV.Open: %w", err)
 	}
 
-	// done
 	return nil
-
-fail:
-	db.Close()
-	return fmt.Errorf("KV.Open: %w", err)
 }
 
-/*------- PAGER to BTREE Interface  ------*/
-// retrive page (Bnode) from pointer
-func (db *KV) pageGet(pointer uint64) BNode {
+/*----- BTREE PERSISTANCE -----*/
+func (db *KV) pageGet(ptr uint64) BNode {
 	start := uint64(0)
+
 	for _, chunk := range db.mmap.chunks {
 		end := start + uint64(len(chunk))/BTREE_MAX_NODE_SIZE
-		if pointer < end { // pointer falls in current chunck
-			offset := BTREE_MAX_NODE_SIZE * (pointer - start)
-			return BNode(chunk[offset : offset+BTREE_MAX_NODE_SIZE]) // ? correct syntax
+		if ptr < end {
+			offset := BTREE_MAX_NODE_SIZE * (ptr - start)
+			return BNode(chunk[offset : offset+BTREE_MAX_NODE_SIZE])
 		}
 		start = end
 	}
-	panic("bad pointer")
+
+	panic("bad ptr")
 }
 
-// Allocate a new page
 func (db *KV) pageNew(node BNode) uint64 {
 	// TODO: reuse deallocated pages
-	assert(node.nbytes() <= BTREE_MAX_NODE_SIZE, "node size exceeds the limit")
-	pointer := db.page.flushed + uint64(len(db.page.temp)) //current db size
+	assert(len(node) <= BTREE_MAX_NODE_SIZE, " ")
+	ptr := db.page.flushed + uint64(len(db.page.temp))
 	db.page.temp = append(db.page.temp, node)
-	return pointer
+	return ptr
 }
 
-// callback for BTree, deallocate a page.
 func (db *KV) pageDel(uint64) {
-	// TODO: implement deallocation
+	// TODO: implement this
 }
 
-// Initial mmap (covers the whole file)
+// initial mmap covers the whole file
 func mmapInit(fp *os.File) (int, []byte, error) {
 	fi, err := fp.Stat()
 	if err != nil {
@@ -140,9 +131,9 @@ func mmapInit(fp *os.File) (int, []byte, error) {
 	}
 
 	mmapSize := INITIAL_MMAP_SIZE
-	assert(mmapSize%BTREE_MAX_NODE_SIZE == 0, "mmap size must be a multiple of page size")
+	assert(mmapSize%BTREE_MAX_NODE_SIZE == 0, "")
 	for mmapSize < int(fi.Size()) {
-		mmapSize *= 2 // larger than file
+		mmapSize *= 2
 	}
 
 	chunk, err := syscall.Mmap(
@@ -157,11 +148,10 @@ func mmapInit(fp *os.File) (int, []byte, error) {
 	return int(fi.Size()), chunk, nil
 }
 
-/*------- META-PAGE MANAGEMENT --------*/
-func metapageLoad(db *KV) error {
-	// empty file, first write will create the metapage
+/*----- METAPAGE MANAGEMENT ------*/
+func loadMetapage(db *KV) error {
 	if db.mmap.file_size == 0 {
-		db.page.flushed = 1 // reserved for the metapage
+		db.page.flushed = 1 // metapage reserved
 		return nil
 	}
 
@@ -175,7 +165,8 @@ func metapageLoad(db *KV) error {
 	}
 
 	bad := !(1 <= used && used <= uint64(db.mmap.file_size/BTREE_MAX_NODE_SIZE))
-	bad = bad || !(0 <= root && root < used)
+	bad = bad || !(root < used)
+
 	if bad {
 		return errors.New("bad meta page")
 	}
@@ -185,8 +176,8 @@ func metapageLoad(db *KV) error {
 	return nil
 }
 
-// Update the meta-page (atomically)
-func metapageStore(db *KV) error {
+// atomic metapage update
+func storeMetapage(db *KV) error {
 	var data [METAPAGE_SIZE]byte
 	copy(data[:DB_SIG_SIZE], []byte(DB_SIG))
 
@@ -195,12 +186,14 @@ func metapageStore(db *KV) error {
 
 	_, err := db.fp.WriteAt(data[:], 0)
 	if err != nil {
-		return fmt.Errorf("write meta page: %w", err)
+		return fmt.Errorf("write master page: %w", err)
 	}
+
 	return nil
 }
 
-// Extend file exponentially
+/*------- EXTENSION MANAGEMENT -----*/
+// extend the file to at least npages
 func extendFile(db *KV, npages int) error {
 	filePages := db.mmap.file_size / BTREE_MAX_NODE_SIZE
 	if filePages >= npages {
@@ -208,13 +201,8 @@ func extendFile(db *KV, npages int) error {
 	}
 
 	for filePages < npages {
-		filePages *= 2
-
-		// inc := filePages / 8
-		// if inc < 1 {
-		// 	inc = 1
-		// }
-		// filePages += inc
+		inc := max(filePages/8, 1)
+		filePages += inc
 	}
 
 	fileSize := filePages * BTREE_MAX_NODE_SIZE
@@ -227,12 +215,12 @@ func extendFile(db *KV, npages int) error {
 	return nil
 }
 
-// Add new mappings
 func extendMmap(db *KV, npages int) error {
 	if db.mmap.mmap_size >= npages*BTREE_MAX_NODE_SIZE {
 		return nil
 	}
 
+	// double the address space
 	chunk, err := syscall.Mmap(
 		int(db.fp.Fd()), int64(db.mmap.mmap_size), db.mmap.mmap_size,
 		syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED,
@@ -247,7 +235,8 @@ func extendMmap(db *KV, npages int) error {
 	return nil
 }
 
-// Persist the newly allocated pages
+/*------ PAGE PERSISTANCE ----*/
+// persist the newly allocated pages after updates
 func flushPages(db *KV) error {
 	if err := writePages(db); err != nil {
 		return err
@@ -255,27 +244,24 @@ func flushPages(db *KV) error {
 	return syncPages(db)
 }
 
-// write & extend
 func writePages(db *KV) error {
 	// extend the file & mmap if needed
 	npages := int(db.page.flushed) + len(db.page.temp)
 	if err := extendFile(db, npages); err != nil {
 		return err
 	}
-
 	if err := extendMmap(db, npages); err != nil {
 		return err
 	}
 
 	// copy data to the file
 	for i, page := range db.page.temp {
-		pointer := db.page.flushed + uint64(i)
-		copy(db.pageGet(pointer), page)
+		ptr := db.page.flushed + uint64(i)
+		copy(db.pageGet(ptr), page)
 	}
 	return nil
 }
 
-// Flush data to disk
 func syncPages(db *KV) error {
 	if err := db.fp.Sync(); err != nil {
 		return fmt.Errorf("fsync: %w", err)
@@ -284,8 +270,7 @@ func syncPages(db *KV) error {
 	db.page.flushed += uint64(len(db.page.temp))
 	db.page.temp = db.page.temp[:0]
 
-	// update & flush the meta page
-	if err := metapageStore(db); err != nil {
+	if err := storeMetapage(db); err != nil {
 		return err
 	}
 
