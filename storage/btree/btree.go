@@ -150,11 +150,10 @@ func nodeReplaceNchild(tree *BTree, newNode BNode, oldNode BNode, idx uint16, ch
 }
 
 /*---- BTREE SPLITS -----*/
-
 func nodeSplit2(left BNode, right BNode, old BNode) {
 	assert(old.nkeys() >= 2, "nodeSplit2: nkeys < 2")
 
-	// the initial guess
+	// initial guess
 	nleft := old.nkeys() / 2
 
 	// try to fit the left half
@@ -374,15 +373,15 @@ func treeDelete(tree *BTree, node BNode, key []byte) BNode {
 
 // delete a key from an internal node
 func nodeDelete(tree *BTree, node BNode, idx uint16, key []byte) BNode {
-	// recurse into the kid
-	kptr := node.getPointer(idx)
+	// recurse to the child node
+	child_pointer := node.getPointer(idx)
+	updated := treeDelete(tree, tree.get(child_pointer), key)
 
-	updated := treeDelete(tree, tree.get(kptr), key)
 	if len(updated) == 0 {
 		return BNode{} // not found
 	}
 
-	tree.del(kptr)
+	tree.del(child_pointer)
 	new := make(BNode, BTREE_MAX_NODE_SIZE)
 
 	// check for merging
