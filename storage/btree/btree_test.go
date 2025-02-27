@@ -163,6 +163,7 @@ func fmix32(h uint32) uint32 {
 // }
 
 func TestBasic(t *testing.T) {
+	fmt.Println("TestBasic")
 	tt := newTreeTester()
 	tt.add("k", "v")
 	tt.verify(t)
@@ -214,6 +215,7 @@ func TestBasic(t *testing.T) {
 }
 
 func TestRandLength(t *testing.T) {
+	fmt.Println("TestRandLength")
 	tt := newTreeTester()
 	for i := 0; i < 200; i++ {
 		klen := fmix32(uint32(2*i+0)) % BTREE_MAX_KEY_SIZE
@@ -232,6 +234,7 @@ func TestRandLength(t *testing.T) {
 }
 
 func TestIncLength(t *testing.T) {
+	fmt.Println("TestIncLength")
 	for l := 1; l < BTREE_MAX_KEY_SIZE+BTREE_MAX_VAL_SIZE; l++ {
 		tt := newTreeTester()
 
