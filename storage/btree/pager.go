@@ -11,7 +11,7 @@ import (
 
 const DB_SIG = "ELKDB"
 const DB_SIG_SIZE = 16
-const METAPAGE_SIZE = 32
+const METAPAGE_SIZE = 40
 const INITIAL_MMAP_SIZE = 64 << 20 // 64MB
 
 // bnode = page
@@ -20,13 +20,16 @@ const INITIAL_MMAP_SIZE = 64 << 20 // 64MB
 
 type KV struct {
 	Path string
-	// internals
 	fp   *os.File
 	tree BTree
+	free FreeList
 
 	page struct {
-		flushed uint64   // database size in number of pages
-		temp    [][]byte // newly allocated pages
+		flushed uint64 // database size in number of pages
+		//temp    [][]byte // newly allocated pages
+		n_free   int // number of pages taken from the free list
+		n_append int // number of pages to be appended
+		updates  map[uint64][]byte
 	}
 
 	mmap struct {
@@ -60,7 +63,19 @@ func (db *KV) Close() {
 }
 
 func (db *KV) Open() error {
-	// open or create the DB file
+	db.page.updates = map[uint64][]byte{}
+
+	// btree callbacks
+	db.tree.get = db.pageGet
+	db.tree.new = db.pageNew
+	db.tree.del = db.pageDel
+
+	// free list callbacks
+	db.free.get = db.pageGet
+	db.free.new = db.pageAppend
+	db.free.use = db.pageUse
+
+	// open DB file
 	fp, err := os.OpenFile(db.Path, os.O_RDWR|os.O_CREATE, 0644)
 	if err != nil {
 		return fmt.Errorf("OpenFile: %w", err)
@@ -78,10 +93,6 @@ func (db *KV) Open() error {
 	db.mmap.mmap_size = len(chunk)
 	db.mmap.chunks = [][]byte{chunk}
 
-	db.tree.get = db.pageGet
-	db.tree.new = db.pageNew
-	db.tree.del = db.pageDel
-
 	err = loadMetapage(db)
 	if err != nil {
 		db.Close()
@@ -92,31 +103,60 @@ func (db *KV) Open() error {
 }
 
 /*----- BTREE PERSISTANCE -----*/
-func (db *KV) pageGet(ptr uint64) BNode {
+func (db *KV) pageDel(pointer uint64) {
+	db.page.updates[pointer] = nil
+}
+
+func (db *KV) pageUse(pointer uint64, node BNode) {
+	db.page.updates[pointer] = node
+}
+
+func (db *KV) pageGet(pointer uint64) BNode {
+	if page, ok := db.page.updates[pointer]; ok {
+		assert(page != nil, "page is null")
+		return BNode(page) // new pages
+	}
+	return db.pageGetMapped(pointer) // retrive pages
+}
+
+func (db *KV) pageGetMapped(pointer uint64) BNode {
 	start := uint64(0)
 
 	for _, chunk := range db.mmap.chunks {
 		end := start + uint64(len(chunk))/BTREE_MAX_NODE_SIZE
-		if ptr < end {
-			offset := BTREE_MAX_NODE_SIZE * (ptr - start)
+		if pointer < end {
+			offset := BTREE_MAX_NODE_SIZE * (pointer - start)
 			return BNode(chunk[offset : offset+BTREE_MAX_NODE_SIZE])
 		}
 		start = end
 	}
-
-	panic("bad ptr")
+	panic("bad pointer")
 }
 
 func (db *KV) pageNew(node BNode) uint64 {
-	// TODO: reuse deallocated pages
-	assert(len(node) <= BTREE_MAX_NODE_SIZE, " ")
-	ptr := db.page.flushed + uint64(len(db.page.temp))
-	db.page.temp = append(db.page.temp, node)
-	return ptr
+	assert(len(node) <= BTREE_MAX_NODE_SIZE, "node too large")
+	pointer := uint64(0)
+
+	if db.page.n_free < db.free.ListLen() {
+		// reuse a deallocated page
+		pointer = db.free.Get(db.page.n_free)
+		db.page.n_free++
+	} else {
+		// append a new page
+		pointer = db.page.flushed + uint64(db.page.n_append)
+		db.page.n_append++
+	}
+
+	db.page.updates[pointer] = node
+	return pointer
 }
 
-func (db *KV) pageDel(uint64) {
-	// TODO: implement this
+func (db *KV) pageAppend(node BNode) uint64 {
+	assert(len(node) <= BTREE_MAX_NODE_SIZE, "node too large")
+	pointer := db.page.flushed + uint64(db.page.n_append)
+	db.page.n_append++
+	db.page.updates[pointer] = node
+	return pointer
 }
 
 // initial mmap covers the whole file
@@ -158,6 +198,7 @@ func loadMetapage(db *KV) error {
 	data := db.mmap.chunks[0]
 	root := binary.LittleEndian.Uint64(data[DB_SIG_SIZE:])
 	used := binary.LittleEndian.Uint64(data[DB_SIG_SIZE+POINTER_SIZE:])
+	free := binary.LittleEndian.Uint64(data[DB_SIG_SIZE+POINTER_SIZE+POINTER_SIZE:])
 
 	// verify the page
 	if !bytes.Equal([]byte(DB_SIG), data[:DB_SIG_SIZE]) {
@@ -166,12 +207,14 @@ func loadMetapage(db *KV) error {
 
 	bad := !(1 <= used && used <= uint64(db.mmap.file_size/BTREE_MAX_NODE_SIZE))
 	bad = bad || !(root < used)
+	bad = bad || !(free < used)
 
 	if bad {
 		return errors.New("bad meta page")
 	}
 
 	db.tree.root = root
+	db.free.head = free
 	db.page.flushed = used
 	return nil
 }
@@ -183,6 +226,7 @@ func storeMetapage(db *KV) error {
 
 	binary.LittleEndian.PutUint64(data[DB_SIG_SIZE:], db.tree.root)
 	binary.LittleEndian.PutUint64(data[DB_SIG_SIZE+POINTER_SIZE:], db.page.flushed)
+	binary.LittleEndian.PutUint64(data[DB_SIG_SIZE+POINTER_SIZE+POINTER_SIZE:], db.free.head)
 
 	_, err := db.fp.WriteAt(data[:], 0)
 	if err != nil {
@@ -245,8 +289,17 @@ func flushPages(db *KV) error {
 }
 
 func writePages(db *KV) error {
-	// extend the file & mmap if needed
-	npages := int(db.page.flushed) + len(db.page.temp)
+	// update the free list
+	freed := []uint64{}
+	for pointer, page := range db.page.updates {
+		if page == nil {
+			freed = append(freed, pointer)
+		}
+	}
+	db.free.Update(db.page.n_free, freed)
+
+	// extend file & mmap
+	npages := int(db.page.flushed) + db.page.n_append
 	if err := extendFile(db, npages); err != nil {
 		return err
 	}
@@ -254,10 +307,11 @@ func writePages(db *KV) error {
 		return err
 	}
 
-	// copy data to the file
-	for i, page := range db.page.temp {
-		ptr := db.page.flushed + uint64(i)
-		copy(db.pageGet(ptr), page)
+	// copy pages to file
+	for pointer, page := range db.page.updates {
+		if page != nil {
+			copy(db.pageGetMapped(pointer), page)
+		}
 	}
 	return nil
 }
@@ -267,8 +321,10 @@ func syncPages(db *KV) error {
 		return fmt.Errorf("fsync: %w", err)
 	}
 
-	db.page.flushed += uint64(len(db.page.temp))
-	db.page.temp = db.page.temp[:0]
+	db.page.flushed += uint64(db.page.n_append)
+	db.page.n_free = 0
+	db.page.n_append = 0
+	db.page.updates = map[uint64][]byte{}
 
 	if err := storeMetapage(db); err != nil {
 		return err
