@@ -25,16 +25,15 @@ type KV struct {
 	free FreeList
 
 	page struct {
-		flushed uint64 // database size in number of pages
-		//temp    [][]byte // newly allocated pages
-		n_free   int // number of pages taken from the free list
-		n_append int // number of pages to be appended
+		flushed  uint64 // db size in pages
+		n_free   int    // pages in freelist
+		n_append int    // pages to  appended
 		updates  map[uint64][]byte
 	}
 
 	mmap struct {
-		file_size int      // file size, can be larger than the database size
-		mmap_size int      // mmap size, can be larger than the file size
+		file_size int
+		mmap_size int
 		chunks    [][]byte // multiple mmaps, can be non-continuous
 	}
 }
@@ -138,11 +137,11 @@ func (db *KV) pageNew(node BNode) uint64 {
 	pointer := uint64(0)
 
 	if db.page.n_free < db.free.ListLen() {
-		// reuse a deallocated page
+		// reuse a page
 		pointer = db.free.Get(db.page.n_free)
 		db.page.n_free++
 	} else {
-		// append a new page
+		// new page
 		pointer = db.page.flushed + uint64(db.page.n_append)
 		db.page.n_append++
 	}
@@ -167,7 +166,7 @@ func mmapInit(fp *os.File) (int, []byte, error) {
 	}
 
 	if fi.Size()%BTREE_MAX_NODE_SIZE != 0 {
-		return 0, nil, errors.New("file size is not a multiple of page size")
+		return 0, nil, errors.New("file size is not a multiple of node(page) size")
 	}
 
 	mmapSize := INITIAL_MMAP_SIZE
