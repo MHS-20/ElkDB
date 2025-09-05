@@ -93,7 +93,7 @@ func (rec *Record) Get(key string) *Value {
 
 // rearrange a record to match the column order defined in the table definition
 func reorderRecord(tdef *TableDef, rec Record) ([]Value, error) {
-	assert(len(rec.Cols) == len(rec.Vals))
+	assert(len(rec.Cols) == len(rec.Vals), "cols number doesn't match values number")
 	out := make([]Value, len(tdef.Cols))
 	for i, c := range tdef.Cols {
 		v := rec.Get(c)
@@ -171,7 +171,7 @@ func unescapeString(in []byte) []byte {
 	for i := 0; i < len(in); i++ {
 		if in[i] == 0x01 {
 			i++
-			assert(in[i] >= 1)
+			assert(in[i] >= 1, "bad escape sequence")
 			out[pos] = in[i] - 1
 		} else {
 			out[pos] = in[i]
@@ -179,4 +179,32 @@ func unescapeString(in []byte) []byte {
 		pos++
 	}
 	return out[:pos]
+}
+
+// order-preserving encoding
+func encodeValues(out []byte, vals []Value) []byte {
+	for _, v := range vals {
+		switch v.Type {
+		case TYPE_INT64:
+			var buf [8]byte
+			u := uint64(v.I64) + (1 << 63)
+			binary.BigEndian.PutUint64(buf[:], u)
+			out = append(out, buf[:]...)
+		case TYPE_BYTES:
+			out = append(out, escapeString(v.Str)...)
+			out = append(out, 0) // null-terminated
+		default:
+			panic("unknown type during encoding")
+		}
+	}
+	return out
+}
+
+// primary keys encoding: prefix + encoded values
+func encodeKey(out []byte, prefix uint32, vals []Value) []byte {
+	var buf [4]byte
+	binary.BigEndian.PutUint32(buf[:], prefix)
+	out = append(out, buf[:]...)
+	out = encodeValues(out, vals)
+	return out
 }
