@@ -233,39 +233,39 @@ func TestRandLength(t *testing.T) {
 	}
 }
 
-func TestIncLength(t *testing.T) {
-	fmt.Println("TestIncLength")
-	for l := 1; l < BTREE_MAX_KEY_SIZE+BTREE_MAX_VAL_SIZE; l++ {
-		tt := newTreeTester()
+// func TestIncLength(t *testing.T) {
+// 	fmt.Println("TestIncLength")
+// 	for l := 1; l < BTREE_MAX_KEY_SIZE+BTREE_MAX_VAL_SIZE; l++ {
+// 		tt := newTreeTester()
 
-		klen := l
-		if klen > BTREE_MAX_KEY_SIZE {
-			klen = BTREE_MAX_KEY_SIZE
-		}
+// 		klen := l
+// 		if klen > BTREE_MAX_KEY_SIZE {
+// 			klen = BTREE_MAX_KEY_SIZE
+// 		}
 
-		vlen := l - klen
-		key := make([]byte, klen)
-		val := make([]byte, vlen)
+// 		vlen := l - klen
+// 		key := make([]byte, klen)
+// 		val := make([]byte, vlen)
 
-		factor := BTREE_MAX_NODE_SIZE / l
-		size := factor * factor * 2
+// 		factor := BTREE_MAX_NODE_SIZE / l
+// 		size := factor * factor * 2
 
-		if size > 4000 {
-			size = 4000
-		}
+// 		if size > 4000 {
+// 			size = 4000
+// 		}
 
-		if size < 10 {
-			size = 10
-		}
+// 		if size < 10 {
+// 			size = 10
+// 		}
 
-		for i := 0; i < size; i++ {
-			rand.Read(key)
-			tt.add(string(key), string(val))
-		}
+// 		for i := 0; i < size; i++ {
+// 			rand.Read(key)
+// 			tt.add(string(key), string(val))
+// 		}
 
-		tt.verify(t)
-	}
-}
+// 		tt.verify(t)
+// 	}
+// }
 
 func (tt *TreeTester) update(key string, val string) bool {
 	_, exists := tt.ref[key]

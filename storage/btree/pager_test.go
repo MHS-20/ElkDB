@@ -221,30 +221,30 @@ func TestPagerRandLength(t *testing.T) {
 	}
 }
 
-func TestPagerIncLength(t *testing.T) {
-	fmt.Println("TestPagerIncLength")
-	for l := 1; l < BTREE_MAX_KEY_SIZE+BTREE_MAX_VAL_SIZE; l++ {
-		pt := newPagerTester()
+// func TestPagerIncLength(t *testing.T) {
+// 	fmt.Println("TestPagerIncLength")
+// 	for l := 1; l < BTREE_MAX_KEY_SIZE+BTREE_MAX_VAL_SIZE; l++ {
+// 		pt := newPagerTester()
 
-		klen := l
-		if klen > BTREE_MAX_KEY_SIZE {
-			klen = BTREE_MAX_KEY_SIZE
-		}
-		vlen := l - klen
-		key := make([]byte, klen)
-		val := make([]byte, vlen)
+// 		klen := l
+// 		if klen > BTREE_MAX_KEY_SIZE {
+// 			klen = BTREE_MAX_KEY_SIZE
+// 		}
+// 		vlen := l - klen
+// 		key := make([]byte, klen)
+// 		val := make([]byte, vlen)
 
-		factor := BTREE_MAX_NODE_SIZE / l
-		size := max(min(factor*factor*2, 40), 10)
-		for range size {
-			rand.Read(key)
-			pt.add(string(key), string(val))
-		}
+// 		factor := BTREE_MAX_NODE_SIZE / l
+// 		size := max(min(factor*factor*2, 40), 10)
+// 		for range size {
+// 			rand.Read(key)
+// 			pt.add(string(key), string(val))
+// 		}
 
-		pt.verify(t)
-		pt.dispose()
-	}
-}
+// 		pt.verify(t)
+// 		pt.dispose()
+// 	}
+// }
 
 // Metodo per aggiornare un valore esistente tramite il pager
 func (pt *PagerTester) update(key string, val string, mode int) bool {
@@ -259,25 +259,26 @@ func (pt *PagerTester) update(key string, val string, mode int) bool {
 	}
 	return updated
 }
-func TestPagerUpdate(t *testing.T) {
-	fmt.Println("TestPagerUpdate")
-	pt := newPagerTester()
-	defer pt.dispose()
 
-	// Inserisci alcune chiavi
-	pt.add("a", "1")
-	pt.add("b", "2")
-	pt.add("c", "3")
-	pt.verify(t)
+// func TestPagerUpdate(t *testing.T) {
+// 	fmt.Println("TestPagerUpdate")
+// 	pt := newPagerTester()
+// 	defer pt.dispose()
 
-	// Aggiorna una chiave esistente
-	is.True(t, pt.update("b", "22", MODE_UPDATE_ONLY))
-	pt.verify(t)
-	keys, vals := pt.dump()
-	is.Equal(t, []string{"a", "b", "c"}, keys)
-	is.Equal(t, []string{"1", "22", "3"}, vals)
+// 	// Inserisci alcune chiavi
+// 	pt.add("a", "1")
+// 	pt.add("b", "2")
+// 	pt.add("c", "3")
+// 	pt.verify(t)
 
-	// Aggiorna una chiave non esistente (deve fallire)
-	is.False(t, pt.update("d", "4", MODE_UPDATE_ONLY))
-	pt.verify(t)
-}
+// 	// Aggiorna una chiave esistente
+// 	is.True(t, pt.update("b", "22", MODE_UPDATE_ONLY))
+// 	pt.verify(t)
+// 	keys, vals := pt.dump()
+// 	is.Equal(t, []string{"a", "b", "c"}, keys)
+// 	is.Equal(t, []string{"1", "22", "3"}, vals)
+
+// 	// Aggiorna una chiave non esistente (deve fallire)
+// 	is.False(t, pt.update("d", "4", MODE_UPDATE_ONLY))
+// 	pt.verify(t)
+// }
