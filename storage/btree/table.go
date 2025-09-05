@@ -3,6 +3,7 @@ package btree
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 )
 
@@ -284,4 +285,82 @@ func tableDefCheck(tdef *TableDef) error {
 		return fmt.Errorf("bad table definition: %s", tdef.Name)
 	}
 	return nil
+}
+
+/*--------- INTERNAL TABLES OPERATIONS ---------*/
+// get the table definition by name from the internal table
+func getTableDefDB(db *DB, name string) *TableDef {
+	rec := (&Record{}).AddStr("name", []byte(name))
+	ok, err := dbGet(db, TDEF_TABLE, rec)
+	assert(err == nil, "meta get failed")
+	if !ok {
+		return nil
+	}
+
+	tdef := &TableDef{}
+	err = json.Unmarshal(rec.Get("def").Str, tdef)
+	assert(err == nil, "json unmarshal failed")
+	return tdef
+}
+
+// get the table definition by name
+func getTableDef(db *DB, name string) *TableDef {
+	if tdef, ok := INTERNAL_TABLES[name]; ok {
+		return tdef // expose internal tables
+	}
+	// check the cached definitions
+	tdef, ok := db.tables[name]
+	if !ok {
+		if db.tables == nil {
+			db.tables = map[string]*TableDef{}
+		}
+		// if not in cache, load the definition from the internal table
+		tdef = getTableDefDB(db, name)
+		if tdef != nil {
+			db.tables[name] = tdef // update cache
+		}
+	}
+	return tdef
+}
+
+/*------------ PUBLIC DB INTERFACE ----------*/
+func (db *DB) TableNew(tdef *TableDef) error {
+	if err := tableDefCheck(tdef); err != nil {
+		return err
+	}
+
+	// check if it already exists in the internal table
+	table := (&Record{}).AddStr("name", []byte(tdef.Name))
+	ok, err := dbGet(db, TDEF_TABLE, table)
+	assert(err == nil, "meta get failed")
+	if ok {
+		return fmt.Errorf("table exists: %s", tdef.Name)
+	}
+
+	// allocate a new prefix
+	assert(tdef.Prefix == 0, "table prefix must be 0")
+	tdef.Prefix = TABLE_PREFIX_MIN
+	meta := (&Record{}).AddStr("key", []byte("next_prefix"))
+	ok, err = dbGet(db, TDEF_META, meta)
+	assert(err == nil, "meta get failed")
+	if ok {
+		tdef.Prefix = binary.LittleEndian.Uint32(meta.Get("val").Str)
+		assert(tdef.Prefix > TABLE_PREFIX_MIN, "bad next_prefix value")
+	} else {
+		meta.AddStr("val", make([]byte, 4))
+	}
+
+	// update the next prefix
+	binary.LittleEndian.PutUint32(meta.Get("val").Str, tdef.Prefix+1)
+	_, err = dbUpdate(db, TDEF_META, *meta, 0)
+	if err != nil {
+		return err
+	}
+
+	// store the definition
+	val, err := json.Marshal(tdef)
+	assert(err == nil, "json marshal failed")
+	table.AddStr("def", val)
+	_, err = dbUpdate(db, TDEF_TABLE, *table, 0)
+	return err
 }
