@@ -135,3 +135,48 @@ func checkRecord(tdef *TableDef, rec Record, n int) ([]Value, error) {
 	return vals, nil
 }
 
+/*--------- ENCODING ---------*/
+// Strings are encoded as null-terminated strings,
+// therefore is needed to escape the null byte
+// 0x00 → 0x01 0x01
+// 0x01 → 0x01 0x02
+func escapeString(in []byte) []byte {
+	zeros := bytes.Count(in, []byte{0})
+	ones := bytes.Count(in, []byte{1})
+	if zeros+ones == 0 { // no bytes to escape
+		return in
+	}
+	out := make([]byte, len(in)+zeros+ones)
+	pos := 0
+	for _, currentByte := range in {
+		if currentByte <= 1 {
+			out[pos+0] = 0x01
+			out[pos+1] = currentByte + 1
+			pos += 2
+		} else {
+			out[pos] = currentByte
+			pos += 1
+		}
+	}
+	return out
+}
+
+// decodes a string previously encoded with escapeString
+func unescapeString(in []byte) []byte {
+	if bytes.Count(in, []byte{1}) == 0 {
+		return in
+	}
+	out := make([]byte, len(in))
+	pos := 0
+	for i := 0; i < len(in); i++ {
+		if in[i] == 0x01 {
+			i++
+			assert(in[i] >= 1)
+			out[pos] = in[i] - 1
+		} else {
+			out[pos] = in[i]
+		}
+		pos++
+	}
+	return out[:pos]
+}
