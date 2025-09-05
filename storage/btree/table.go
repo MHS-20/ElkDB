@@ -364,3 +364,50 @@ func (db *DB) TableNew(tdef *TableDef) error {
 	_, err = dbUpdate(db, TDEF_TABLE, *table, 0)
 	return err
 }
+
+// get a single row by the primary key
+func (db *DB) Get(table string, rec *Record) (bool, error) {
+	tdef := getTableDef(db, table)
+	if tdef == nil {
+		return false, fmt.Errorf("table not found: %s", table)
+	}
+	return dbGet(db, tdef, rec)
+}
+
+// add a record
+func (db *DB) Set(table string, rec Record, mode int) (bool, error) {
+	tdef := getTableDef(db, table)
+	if tdef == nil {
+		return false, fmt.Errorf("table not found: %s", table)
+	}
+	return dbUpdate(db, tdef, rec, mode)
+}
+
+func (db *DB) Insert(table string, rec Record) (bool, error) {
+	return db.Set(table, rec, MODE_INSERT_ONLY)
+}
+
+func (db *DB) Update(table string, rec Record) (bool, error) {
+	return db.Set(table, rec, MODE_UPDATE_ONLY)
+}
+
+func (db *DB) Upsert(table string, rec Record) (bool, error) {
+	return db.Set(table, rec, MODE_UPSERT)
+}
+
+func (db *DB) Delete(table string, rec Record) (bool, error) {
+	tdef := getTableDef(db, table)
+	if tdef == nil {
+		return false, fmt.Errorf("table not found: %s", table)
+	}
+	return dbDelete(db, tdef, rec)
+}
+
+func (db *DB) Open() error {
+	db.kv.Path = db.Path
+	return db.kv.Open()
+}
+
+func (db *DB) Close() {
+	db.kv.Close()
+}
