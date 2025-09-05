@@ -3,7 +3,6 @@ package btree
 import (
 	"bytes"
 	"encoding/binary"
-	"encoding/json"
 	"fmt"
 )
 

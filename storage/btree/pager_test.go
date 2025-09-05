@@ -245,3 +245,39 @@ func TestPagerIncLength(t *testing.T) {
 		pt.dispose()
 	}
 }
+
+// Metodo per aggiornare un valore esistente tramite il pager
+func (pt *PagerTester) update(key string, val string, mode int) bool {
+	// _, exists := pt.ref[key]
+	// if !exists {
+	// 	return false
+	// }
+	updated, err := pt.db.Update([]byte(key), []byte(val), mode)
+	assert(err == nil, "update failed")
+	if updated {
+		pt.ref[key] = val
+	}
+	return updated
+}
+func TestPagerUpdate(t *testing.T) {
+	fmt.Println("TestPagerUpdate")
+	pt := newPagerTester()
+	defer pt.dispose()
+
+	// Inserisci alcune chiavi
+	pt.add("a", "1")
+	pt.add("b", "2")
+	pt.add("c", "3")
+	pt.verify(t)
+
+	// Aggiorna una chiave esistente
+	is.True(t, pt.update("b", "22", MODE_UPDATE_ONLY))
+	pt.verify(t)
+	keys, vals := pt.dump()
+	is.Equal(t, []string{"a", "b", "c"}, keys)
+	is.Equal(t, []string{"1", "22", "3"}, vals)
+
+	// Aggiorna una chiave non esistente (deve fallire)
+	is.False(t, pt.update("d", "4", MODE_UPDATE_ONLY))
+	pt.verify(t)
+}

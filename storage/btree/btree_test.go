@@ -266,3 +266,39 @@ func TestIncLength(t *testing.T) {
 		tt.verify(t)
 	}
 }
+
+func (tt *TreeTester) update(key string, val string) bool {
+	_, exists := tt.ref[key]
+	if !exists {
+		return false
+	}
+	req := &InsertReq{Key: []byte(key), Val: []byte(val), Mode: MODE_UPDATE_ONLY}
+	tt.tree.InsertImpl(req)
+	if !req.Added {
+		tt.ref[key] = val
+		return true
+	}
+	return false
+}
+
+// Test specifico per la funzionalità di update
+func TestUpdate(t *testing.T) {
+	fmt.Println("TestUpdate")
+	tt := newTreeTester()
+	// Inserisci alcune chiavi
+	tt.add("a", "1")
+	tt.add("b", "2")
+	tt.add("c", "3")
+	tt.verify(t)
+
+	// Aggiorna una chiave esistente
+	is.True(t, tt.update("b", "22"))
+	tt.verify(t)
+	keys, vals := tt.dump()
+	is.Equal(t, []string{"a", "b", "c"}, keys)
+	is.Equal(t, []string{"1", "22", "3"}, vals)
+
+	// Aggiorna una chiave non esistente
+	is.False(t, tt.update("d", "4"))
+	tt.verify(t)
+}

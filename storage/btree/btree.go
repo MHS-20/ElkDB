@@ -212,59 +212,89 @@ func nodeSplit3(old BNode) (uint16, [3]BNode) {
 }
 
 /*---- BTREE INSERTION ----*/
+// modes of the updates
+const (
+	MODE_UPSERT      = 0 // insert or replace
+	MODE_UPDATE_ONLY = 1 // update existing keys
+	MODE_INSERT_ONLY = 2 // only add new keys
+)
+
+type InsertReq struct {
+	tree *BTree
+	// out
+	Added bool // added a new key
+	// in
+	Key  []byte
+	Val  []byte
+	Mode int
+}
+
 // insert a KV into a node,the caller is responsible for:
 // deallocating the input node, splitting and allocating result nodes.
-func treeInsert(tree *BTree, node BNode, key []byte, val []byte) BNode {
-
-	// the result node (allow temporary overflows before splitting)
-	newNode := make(BNode, 2*BTREE_MAX_NODE_SIZE)
-
-	// where to insert the key
-	idx := nodeLookupLE(node, key)
-
+func treeInsert(req *InsertReq, node BNode) BNode {
+	// the result node.
+	// it's allowed to be bigger than 1 page and will be split if so
+	new := make(BNode, 2*BTREE_MAX_NODE_SIZE)
+	// where to insert the key?
+	idx := nodeLookupLE(node, req.Key)
 	// act depending on the node type
 	switch node.btype() {
 	case BTREE_LEAF:
 		// leaf, node.getKey(idx) <= key
-		if bytes.Equal(key, node.getKey(idx)) {
-			// found the key, update the value
-			leafUpdate(newNode, node, idx, key, val)
+		if bytes.Equal(req.Key, node.getKey(idx)) {
+			// found the key, update it.
+			if req.Mode == MODE_INSERT_ONLY {
+				return BNode{}
+			}
+			if bytes.Equal(req.Val, node.getVal(idx)) {
+				return BNode{}
+			}
+			leafUpdate(new, node, idx, req.Key, req.Val)
 		} else {
-			// key not found, insert the k-v pair
-			leafInsert(newNode, node, idx+1, key, val)
+			// insert it after the position.
+			if req.Mode == MODE_UPDATE_ONLY {
+				return BNode{}
+			}
+			leafInsert(new, node, idx+1, req.Key, req.Val)
+			req.Added = true
 		}
+		return new
 	case BTREE_NODE:
-		// internal node, insert to a child node
-		nodeInsert(tree, newNode, node, idx, key, val)
+		// internal node, insert it to a kid node.
+		return nodeInsert(req, new, node, idx)
 	default:
 		panic("bad node!")
 	}
-	return newNode
 }
 
-// KV insertion to an internal node
-func nodeInsert(tree *BTree, newNode BNode, node BNode, idx uint16, key []byte, val []byte) {
-	// child pointer
+// part of the treeInsert(): KV insertion to an internal node
+func nodeInsert(req *InsertReq, new BNode, node BNode, idx uint16) BNode {
+	// recursive insertion to the kid node
 	kptr := node.getPointer(idx)
-
-	// recursive insertion to the child node
-	knode := treeInsert(tree, tree.get(kptr), key, val)
-
+	updated := treeInsert(req, req.tree.get(kptr))
+	if len(updated) == 0 {
+		return BNode{}
+	}
+	// deallocate the kid node
+	req.tree.del(kptr)
 	// split the result
-	nsplit, split := nodeSplit3(knode)
-
-	// deallocate the child node
-	tree.del(kptr)
-
-	// update the child links
-	nodeReplaceNchild(tree, newNode, node, idx, split[:nsplit]...)
+	nsplit, splited := nodeSplit3(updated)
+	// update the kid links
+	nodeReplaceNchild(req.tree, new, node, idx, splited[:nsplit]...)
+	return new
 }
 
 /*--- BTREE KV-STORE INTERFACE ---*/
-func (tree *BTree) Insert(key []byte, val []byte) {
-	assert(len(key) != 0, "inserting empty key")
-	assert(len(key) <= BTREE_MAX_KEY_SIZE, "key size exceeds BTREE_MAX_KEY_SIZE")
-	assert(len(val) <= BTREE_MAX_VAL_SIZE, "val size exceeds BTREE_MAX_VAL_SIZE")
+func (tree *BTree) Insert(key []byte, val []byte) bool {
+	req := &InsertReq{Key: key, Val: val}
+	tree.InsertImpl(req)
+	return req.Added
+}
+
+func (tree *BTree) InsertImpl(req *InsertReq) {
+	assert(len(req.Key) != 0, "inserting empty key")
+	assert(len(req.Key) <= BTREE_MAX_KEY_SIZE, "key size exceeds BTREE_MAX_KEY_SIZE")
+	assert(len(req.Val) <= BTREE_MAX_VAL_SIZE, "val size exceeds BTREE_MAX_VAL_SIZE")
 
 	if tree.root == 0 {
 		// create the first node
@@ -275,12 +305,19 @@ func (tree *BTree) Insert(key []byte, val []byte) {
 		nodeAppendKV(root, 0, 0, nil, nil)
 
 		// add actual key-value
-		nodeAppendKV(root, 1, 0, key, val)
+		nodeAppendKV(root, 1, 0, req.Key, req.Val)
 		tree.root = tree.new(root)
+		req.Added = true
 		return
 	}
 
-	node := treeInsert(tree, tree.get(tree.root), key, val)
+	req.tree = tree
+	node := treeInsert(req, tree.get(tree.root))
+
+	if len(node) == 0 {
+		return
+	}
+
 	nsplit, split := nodeSplit3(node)
 	tree.del(tree.root)
 
