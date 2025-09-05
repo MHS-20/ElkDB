@@ -1,11 +1,20 @@
 package storage
 
+import "bytes"
+
 // B-tree iterator
 type BIter struct {
 	tree *BTree
 	path []BNode  // from root to leaf
 	pos  []uint16 // indexes into the nodes
 }
+
+const (
+	CMP_GE = +3 // >=
+	CMP_GT = +2 // >
+	CMP_LT = -2 // <
+	CMP_LE = -3 // <=
+)
 
 func (iter *BIter) Clone() *BIter {
 	return &BIter{
@@ -100,4 +109,42 @@ func (tree *BTree) SeekLE(key []byte) *BIter {
 		}
 	}
 	return iter
+}
+
+// find the closest position to a key with respect to the `cmp` relation
+func (tree *BTree) Seek(key []byte, cmp int) *BIter {
+	iter := tree.SeekLE(key)
+	if cmp != CMP_LE && iter.Valid() {
+		cur, _ := iter.Deref()
+		if !cmpOK(cur, cmp, key) {
+			// off by one
+			if cmp > 0 {
+				iter.Next()
+			} else {
+				iter.Prev()
+			}
+		}
+	}
+	if iter.Valid() {
+		cur, _ := iter.Deref()
+		assert(cmpOK(cur, cmp, key), "seek error")
+	}
+	return iter
+}
+
+// key cmp ref
+func cmpOK(key []byte, cmp int, ref []byte) bool {
+	r := bytes.Compare(key, ref)
+	switch cmp {
+	case CMP_GE:
+		return r >= 0
+	case CMP_GT:
+		return r > 0
+	case CMP_LT:
+		return r < 0
+	case CMP_LE:
+		return r <= 0
+	default:
+		panic("what?")
+	}
 }
