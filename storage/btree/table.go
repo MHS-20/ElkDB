@@ -208,3 +208,23 @@ func encodeKey(out []byte, prefix uint32, vals []Value) []byte {
 	out = encodeValues(out, vals)
 	return out
 }
+
+// already know the types of the values
+func decodeValues(in []byte, out []Value) {
+	for i := range out {
+		switch out[i].Type {
+		case TYPE_INT64:
+			u := binary.BigEndian.Uint64(in[:8])
+			out[i].I64 = int64(u - (1 << 63))
+			in = in[8:]
+		case TYPE_BYTES:
+			idx := bytes.IndexByte(in, 0)
+			assert(idx >= 0, "bad string encoding")
+			out[i].Str = unescapeString(in[:idx])
+			in = in[idx+1:]
+		default:
+			panic("what?")
+		}
+	}
+	assert(len(in) == 0, "extra bytes after decoding")
+}
