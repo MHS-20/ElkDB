@@ -55,3 +55,17 @@ var INTERNAL_TABLES map[string]*TableDef = map[string]*TableDef{
 }
 
 const TABLE_PREFIX_MIN = 100
+
+/*--------- RECORD ---------*/
+// table cell
+type Value struct {
+	Type uint32
+	I64  int64
+	Str  []byte
+}
+
+// table row
+type Record struct {
+	Cols []string
+	Vals []Value
+}
