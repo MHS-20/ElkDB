@@ -40,3 +40,21 @@ func (iter *BIter) Valid() bool {
 	node := iter.path[last]
 	return iter.pos[last] < node.nkeys()
 }
+
+func iterPrev(iter *BIter, level int) {
+	if iter.pos[level] > 0 {
+		iter.pos[level]-- // move within this node
+	} else if level > 0 {
+		iterPrev(iter, level-1) // move to a slibing node
+	} else {
+		return // dummy key
+	}
+
+	if level+1 < len(iter.pos) {
+		// update the kid node
+		node := iter.path[level]
+		kid := iter.tree.get(node.getPointer(iter.pos[level]))
+		iter.path[level+1] = kid
+		iter.pos[level+1] = kid.nkeys() - 1
+	}
+}
