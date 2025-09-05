@@ -69,3 +69,25 @@ type Record struct {
 	Cols []string
 	Vals []Value
 }
+
+func (rec *Record) AddStr(key string, val []byte) *Record {
+	rec.Cols = append(rec.Cols, key)
+	rec.Vals = append(rec.Vals, Value{Type: TYPE_BYTES, Str: val})
+	return rec
+}
+
+func (rec *Record) AddInt64(key string, val int64) *Record {
+	rec.Cols = append(rec.Cols, key)
+	rec.Vals = append(rec.Vals, Value{Type: TYPE_INT64, I64: val})
+	return rec
+}
+
+func (rec *Record) Get(key string) *Value {
+	for i, c := range rec.Cols {
+		if c == key {
+			return &rec.Vals[i]
+		}
+	}
+	return nil
+}
+
