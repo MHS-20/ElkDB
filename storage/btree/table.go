@@ -251,3 +251,37 @@ func dbGet(db *DB, tdef *TableDef, rec *Record) (bool, error) {
 	rec.Vals = append(rec.Vals, values[tdef.PKeys:]...)
 	return true, nil
 }
+
+// add a row to the table
+func dbUpdate(db *DB, tdef *TableDef, rec Record, mode int) (bool, error) {
+	values, err := checkRecord(tdef, rec, len(tdef.Cols))
+	if err != nil {
+		return false, err
+	}
+
+	key := encodeKey(nil, tdef.Prefix, values[:tdef.PKeys])
+	val := encodeValues(nil, values[tdef.PKeys:])
+	return db.kv.Update(key, val, mode)
+}
+
+// delete a record by its primary key
+func dbDelete(db *DB, tdef *TableDef, rec Record) (bool, error) {
+	values, err := checkRecord(tdef, rec, tdef.PKeys)
+	if err != nil {
+		return false, err
+	}
+
+	key := encodeKey(nil, tdef.Prefix, values[:tdef.PKeys])
+	return db.kv.Del(key)
+}
+
+// verify validity of table definition
+func tableDefCheck(tdef *TableDef) error {
+	bad := tdef.Name == "" || len(tdef.Cols) == 0
+	bad = bad || len(tdef.Cols) != len(tdef.Types)
+	bad = bad || !(1 <= tdef.PKeys && int(tdef.PKeys) <= len(tdef.Cols))
+	if bad {
+		return fmt.Errorf("bad table definition: %s", tdef.Name)
+	}
+	return nil
+}
