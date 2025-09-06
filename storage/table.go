@@ -368,6 +368,34 @@ func (sc *Scanner) Deref(rec *Record) {
 	decodeValues(val, rec.Vals[sc.tdef.PKeys:])
 }
 
+func dbScan(db *DB, tdef *TableDef, req *Scanner) error {
+	// sanity checks
+	switch {
+	case req.Cmp1 > 0 && req.Cmp2 < 0:
+	case req.Cmp2 > 0 && req.Cmp1 < 0:
+	default:
+		return fmt.Errorf("bad range")
+	}
+
+	// TODO: allow prefixes
+	values1, err := checkRecord(tdef, req.Key1, tdef.PKeys)
+	if err != nil {
+		return err
+	}
+	values2, err := checkRecord(tdef, req.Key2, tdef.PKeys)
+	if err != nil {
+		return err
+	}
+
+	req.tdef = tdef
+
+	// seek to the start key
+	keyStart := encodeKey(nil, tdef.Prefix, values1[:tdef.PKeys])
+	req.keyEnd = encodeKey(nil, tdef.Prefix, values2[:tdef.PKeys])
+	req.iter = db.kv.tree.Seek(keyStart, req.Cmp1)
+	return nil
+}
+
 /*------------ PUBLIC DB INTERFACE ----------*/
 func (db *DB) TableNew(tdef *TableDef) error {
 	if err := tableDefCheck(tdef); err != nil {
@@ -446,6 +474,14 @@ func (db *DB) Delete(table string, rec Record) (bool, error) {
 		return false, fmt.Errorf("table not found: %s", table)
 	}
 	return dbDelete(db, tdef, rec)
+}
+
+func (db *DB) Scan(table string, req *Scanner) error {
+	tdef := getTableDef(db, table)
+	if tdef == nil {
+		return fmt.Errorf("table not found: %s", table)
+	}
+	return dbScan(db, tdef, req)
 }
 
 func (db *DB) Open() error {
