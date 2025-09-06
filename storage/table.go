@@ -323,6 +323,17 @@ func getTableDef(db *DB, name string) *TableDef {
 	return tdef
 }
 
+/*------------ SCANNER - RANGE QUERIES ----------*/
+type Scanner struct {
+	Cmp1 int
+	Cmp2 int
+	Key1 Record
+	Key2 Record
+	tdef   *TableDef
+	iter   *BIter
+	keyEnd []byte // the encoded Key2
+}
+
 /*------------ PUBLIC DB INTERFACE ----------*/
 func (db *DB) TableNew(tdef *TableDef) error {
 	if err := tableDefCheck(tdef); err != nil {
