@@ -334,6 +334,40 @@ type Scanner struct {
 	keyEnd []byte // the encoded Key2
 }
 
+// within the range or not?
+func (sc *Scanner) Valid() bool {
+	if !sc.iter.Valid() {
+		return false
+	}
+	key, _ := sc.iter.Deref()
+	return cmpOK(key, sc.Cmp2, sc.keyEnd)
+}
+
+// move the underlying B-tree iterator
+func (sc *Scanner) Next() {
+	assert(sc.Valid(), "invalid iterator in range query")
+	if sc.Cmp1 > 0 {
+		sc.iter.Next()
+	} else {
+		sc.iter.Prev()
+	}
+}
+
+// fetch the current row
+func (sc *Scanner) Deref(rec *Record) {
+	assert(sc.Valid(), "invalid iterator in scanner")
+
+	rec.Cols = sc.tdef.Cols
+	rec.Vals = rec.Vals[:0]
+	for _, type_ := range sc.tdef.Types {
+		rec.Vals = append(rec.Vals, Value{Type: type_})
+	}
+
+	key, val := sc.iter.Deref()
+	decodeValues(key[4:], rec.Vals[:sc.tdef.PKeys])
+	decodeValues(val, rec.Vals[sc.tdef.PKeys:])
+}
+
 /*------------ PUBLIC DB INTERFACE ----------*/
 func (db *DB) TableNew(tdef *TableDef) error {
 	if err := tableDefCheck(tdef); err != nil {
