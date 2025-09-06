@@ -206,3 +206,94 @@ func TestTableEncoding(t *testing.T) {
 
 	is.True(t, sort.StringsAreSorted(encoded))
 }
+
+func TestTableScan(t *testing.T) {
+	fmt.Println("Table Scan")
+  r := newTableTester()
+	tdef := &TableDef{
+		Name:  "tbl_test",
+		Cols:  []string{"ki1", "ks2", "s1", "i2"},
+		Types: []uint32{TYPE_INT64, TYPE_BYTES, TYPE_BYTES, TYPE_INT64},
+		PKeys: 2,
+	}
+	r.create(tdef)
+
+	size := 100
+	for i := 0; i < size; i += 2 {
+		rec := Record{}
+		rec.AddInt64("ki1", int64(i)).AddStr("ks2", []byte("hello"))
+		rec.AddStr("s1", []byte("world")).AddInt64("i2", int64(-i))
+		added := r.add("tbl_test", rec)
+		assert(added, "add failed  in scanner test")
+	}
+
+	tmpkey := func(n int) Record {
+		rec := Record{}
+		rec.AddInt64("ki1", int64(n)).AddStr("ks2", []byte("hello"))
+		return rec
+	}
+
+	for i := 0; i < size; i += 2 {
+		ref := []int64{}
+		for j := i; j < size; j += 2 {
+			ref = append(ref, int64(j))
+
+			scanners := []Scanner{
+				{
+					Cmp1: CMP_GE,
+					Cmp2: CMP_LE,
+					Key1: tmpkey(i),
+					Key2: tmpkey(j),
+				},
+				{
+					Cmp1: CMP_GE,
+					Cmp2: CMP_LE,
+					Key1: tmpkey(i - 1),
+					Key2: tmpkey(j + 1),
+				},
+				{
+					Cmp1: CMP_GT,
+					Cmp2: CMP_LT,
+					Key1: tmpkey(i - 1),
+					Key2: tmpkey(j + 1),
+				},
+				{
+					Cmp1: CMP_GT,
+					Cmp2: CMP_LT,
+					Key1: tmpkey(i - 2),
+					Key2: tmpkey(j + 2),
+				},
+			}
+			for _, tmp := range scanners {
+				tmp.Cmp1, tmp.Cmp2 = tmp.Cmp2, tmp.Cmp1
+				tmp.Key1, tmp.Key2 = tmp.Key2, tmp.Key1
+				scanners = append(scanners, tmp)
+			}
+
+			for i := range scanners {
+				sc := &scanners[i]
+				err := r.db.Scan("tbl_test", sc)
+				assert(err == nil, "error in scan test")
+
+				keys := []int64{}
+				got := Record{}
+				for sc.Valid() {
+					sc.Deref(&got)
+					keys = append(keys, got.Get("ki1").I64)
+					sc.Next()
+				}
+				if sc.Cmp1 < sc.Cmp2 {
+					// reverse
+					for a := 0; a < len(keys)/2; a++ {
+						b := len(keys) - 1 - a
+						keys[a], keys[b] = keys[b], keys[a]
+					}
+				}
+
+				is.Equal(t, ref, keys)
+			} // scanners
+		} // j
+	} // i
+
+	r.dispose()
+}
