@@ -191,3 +191,127 @@ func nodeDelete(req *DeleteReq, node BNode, idx uint16) BNode {
 	}
 	return new
 }
+
+// should the updated kid be merged with a sibling?
+func shouldMerge(
+	tree *BTree, node BNode,
+	idx uint16, updated BNode,
+) (int, BNode) {
+	if updated.nbytes() > BTREE_PAGE_SIZE/4 {
+		return 0, BNode{}
+	}
+
+	if idx > 0 {
+		sibling := tree.get(node.getPtr(idx - 1))
+		merged := sibling.nbytes() + updated.nbytes() - HEADER
+		if merged <= BTREE_PAGE_SIZE {
+			return -1, sibling
+		}
+	}
+	if idx+1 < node.nkeys() {
+		sibling := tree.get(node.getPtr(idx + 1))
+		merged := sibling.nbytes() + updated.nbytes() - HEADER
+		if merged <= BTREE_PAGE_SIZE {
+			return +1, sibling
+		}
+	}
+	return 0, BNode{}
+}
+
+// the interface
+func (tree *BTree) Insert(key []byte, val []byte) bool {
+	req := &InsertReq{Key: key, Val: val}
+	tree.InsertEx(req)
+	return req.Added
+}
+
+func (tree *BTree) InsertEx(req *InsertReq) {
+	assert(len(req.Key) != 0)
+	assert(len(req.Key) <= BTREE_MAX_KEY_SIZE)
+	assert(len(req.Val) <= BTREE_MAX_VAL_SIZE)
+
+	if tree.root == 0 {
+		// create the first node
+		root := BNode{data: make([]byte, BTREE_PAGE_SIZE)}
+		root.setHeader(BNODE_LEAF, 2)
+		// a dummy key, this makes the tree cover the whole key space.
+		// thus a lookup can always find a containing node.
+		nodeAppendKV(root, 0, 0, nil, nil)
+		nodeAppendKV(root, 1, 0, req.Key, req.Val)
+		tree.root = tree.new(root)
+		req.Added = true
+		return
+	}
+
+	req.tree = tree
+	updated := treeInsert(req, tree.get(tree.root))
+	if len(updated.data) == 0 {
+		return
+	}
+
+	// replace the root node
+	tree.del(tree.root)
+	nsplit, splitted := nodeSplit3(updated)
+	if nsplit > 1 {
+		// the root was split, add a new level.
+		root := BNode{data: make([]byte, BTREE_PAGE_SIZE)}
+		root.setHeader(BNODE_NODE, nsplit)
+		for i, knode := range splitted[:nsplit] {
+			ptr, key := tree.new(knode), knode.getKey(0)
+			nodeAppendKV(root, uint16(i), ptr, key, nil)
+		}
+		tree.root = tree.new(root)
+	} else {
+		tree.root = tree.new(splitted[0])
+	}
+}
+
+func (tree *BTree) Delete(key []byte) bool {
+	return tree.DeleteEx(&DeleteReq{Key: key})
+}
+
+func (tree *BTree) DeleteEx(req *DeleteReq) bool {
+	assert(len(req.Key) != 0)
+	assert(len(req.Key) <= BTREE_MAX_KEY_SIZE)
+	if tree.root == 0 {
+		return false
+	}
+
+	req.tree = tree
+	updated := treeDelete(req, tree.get(tree.root))
+	if len(updated.data) == 0 {
+		return false // not found
+	}
+
+	tree.del(tree.root)
+	if updated.btype() == BNODE_NODE && updated.nkeys() == 1 {
+		// remove a level
+		tree.root = updated.getPtr(0)
+	} else {
+		tree.root = tree.new(updated)
+	}
+	return true
+}
+
+func nodeGetKey(tree *BTree, node BNode, key []byte) ([]byte, bool) {
+	idx := nodeLookupLE(node, key)
+	switch node.btype() {
+	case BNODE_LEAF:
+		if bytes.Equal(key, node.getKey(idx)) {
+			return node.getVal(idx), true
+		} else {
+			return nil, false
+		}
+	case BNODE_NODE:
+		return nodeGetKey(tree, tree.get(node.getPtr(idx)), key)
+	default:
+		panic("bad node!")
+	}
+}
+
+func (tree *BTree) Get(key []byte) ([]byte, bool) {
+	if tree.root == 0 {
+		return nil, false
+	}
+	return nodeGetKey(tree, tree.get(tree.root), key)
+}
