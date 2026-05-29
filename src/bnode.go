@@ -77,3 +77,29 @@ func (node BNode) getOffset(idx uint16) uint16 {
 func (node BNode) setOffset(idx uint16, offset uint16) {
 	binary.LittleEndian.PutUint16(node.data[offsetPos(node, idx):], offset)
 }
+
+// key-values
+func (node BNode) kvPos(idx uint16) uint16 {
+	assert(idx <= node.nkeys())
+	return HEADER + 8*node.nkeys() + 2*node.nkeys() + node.getOffset(idx)
+}
+
+func (node BNode) getKey(idx uint16) []byte {
+	assert(idx < node.nkeys())
+	pos := node.kvPos(idx)
+	klen := binary.LittleEndian.Uint16(node.data[pos:])
+	return node.data[pos+4:][:klen:klen]
+}
+
+func (node BNode) getVal(idx uint16) []byte {
+	assert(idx < node.nkeys())
+	pos := node.kvPos(idx)
+	klen := binary.LittleEndian.Uint16(node.data[pos+0:])
+	vlen := binary.LittleEndian.Uint16(node.data[pos+2:])
+	return node.data[pos+4+klen:][:vlen:vlen]
+}
+
+// node size in bytes
+func (node BNode) nbytes() uint16 {
+	return node.kvPos(node.nkeys())
+}
