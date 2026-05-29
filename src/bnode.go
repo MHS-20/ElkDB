@@ -191,3 +191,79 @@ func leafDelete(new BNode, old BNode, idx uint16) {
 	nodeAppendRange(new, old, 0, 0, idx)
 	nodeAppendRange(new, old, idx, idx+1, old.nkeys()-(idx+1))
 }
+
+// merge two nodes
+func nodeMerge(new BNode, left BNode, right BNode) {
+	new.setHeader(left.btype(), left.nkeys()+right.nkeys())
+	nodeAppendRange(new, left, 0, 0, left.nkeys())
+	nodeAppendRange(new, right, left.nkeys(), 0, right.nkeys())
+	assert(new.nbytes() <= BTREE_PAGE_SIZE)
+}
+
+// split a bigger-than-allowed node into two
+func nodeSplit2(left BNode, right BNode, old BNode) {
+	assert(old.nkeys() >= 2)
+
+	// the initial guess
+	nleft := old.nkeys() / 2
+
+	// try to fit the left half
+	left_bytes := func() uint16 {
+		return HEADER + 8*nleft + 2*nleft + old.getOffset(nleft)
+	}
+	for left_bytes() > BTREE_PAGE_SIZE {
+		nleft--
+	}
+	assert(nleft >= 1)
+
+	// try to fit the right half
+	right_bytes := func() uint16 {
+		return old.nbytes() - left_bytes() + HEADER
+	}
+	for right_bytes() > BTREE_PAGE_SIZE {
+		nleft++
+	}
+
+	assert(nleft < old.nkeys())
+	nright := old.nkeys() - nleft
+
+	left.setHeader(old.btype(), nleft)
+	right.setHeader(old.btype(), nright)
+
+	nodeAppendRange(left, old, 0, 0, nleft)
+	nodeAppendRange(right, old, 0, nleft, nright)
+
+	// the left half may be still too big
+	assert(right.nbytes() <= BTREE_PAGE_SIZE)
+}
+
+// split a node if it's too big, the results are 1-3 nodes
+func nodeSplit3(old BNode) (uint16, [3]BNode) {
+	if old.nbytes() <= BTREE_PAGE_SIZE {
+		old.data = old.data[:BTREE_PAGE_SIZE]
+		return 1, [3]BNode{old}
+	}
+
+	left := BNode{make([]byte, 2*BTREE_PAGE_SIZE)} // might be split later
+	right := BNode{make([]byte, BTREE_PAGE_SIZE)}
+
+	nodeSplit2(left, right, old)
+	if left.nbytes() <= BTREE_PAGE_SIZE {
+		left.data = left.data[:BTREE_PAGE_SIZE]
+		return 2, [3]BNode{left, right}
+	}
+
+	leftleft := BNode{make([]byte, BTREE_PAGE_SIZE)}
+	middle := BNode{make([]byte, BTREE_PAGE_SIZE)}
+
+	nodeSplit2(leftleft, middle, left)
+	assert(leftleft.nbytes() <= BTREE_PAGE_SIZE)
+
+	return 3, [3]BNode{leftleft, middle, right}
+}
+
+func assert(cond bool) {
+	if !cond {
+		panic("assertion failure")
+	}
+}
