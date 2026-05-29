@@ -129,3 +129,65 @@ func nodeInsert(req *InsertReq, new BNode, node BNode, idx uint16) BNode {
 	nodeReplaceKidN(req.tree, new, node, idx, splited[:nsplit]...)
 	return new
 }
+
+type DeleteReq struct {
+	tree *BTree
+	// in
+	Key []byte
+	// out
+	Old []byte
+}
+
+// delete a key from the tree
+func treeDelete(req *DeleteReq, node BNode) BNode {
+	// where to find the key?
+	idx := nodeLookupLE(node, req.Key)
+	// act depending on the node type
+	switch node.btype() {
+	case BNODE_LEAF:
+		if !bytes.Equal(req.Key, node.getKey(idx)) {
+			return BNode{} // not found
+		}
+		// delete the key in the leaf
+		req.Old = node.getVal(idx)
+		new := BNode{data: make([]byte, BTREE_PAGE_SIZE)}
+		leafDelete(new, node, idx)
+		return new
+	case BNODE_NODE:
+		return nodeDelete(req, node, idx)
+	default:
+		panic("bad node!")
+	}
+}
+
+// part of the treeDelete()
+func nodeDelete(req *DeleteReq, node BNode, idx uint16) BNode {
+	tree := req.tree
+	// recurse into the kid
+	kptr := node.getPtr(idx)
+	updated := treeDelete(req, tree.get(kptr))
+	if len(updated.data) == 0 {
+		return BNode{} // not found
+	}
+	tree.del(kptr)
+
+	new := BNode{data: make([]byte, BTREE_PAGE_SIZE)}
+	// check for merging
+	mergeDir, sibling := shouldMerge(tree, node, idx, updated)
+	switch {
+	case mergeDir < 0: // left
+		merged := BNode{data: make([]byte, BTREE_PAGE_SIZE)}
+		nodeMerge(merged, sibling, updated)
+		tree.del(node.getPtr(idx - 1))
+		nodeReplace2Kid(new, node, idx-1, tree.new(merged), merged.getKey(0))
+	case mergeDir > 0: // right
+		merged := BNode{data: make([]byte, BTREE_PAGE_SIZE)}
+		nodeMerge(merged, updated, sibling)
+		tree.del(node.getPtr(idx + 1))
+		nodeReplace2Kid(new, node, idx, tree.new(merged), merged.getKey(0))
+	case mergeDir == 0:
+		assert(updated.nkeys() > 0)
+		nodeReplaceKidN(tree, new, node, idx, updated)
+	}
+	return new
+}
