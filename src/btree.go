@@ -48,3 +48,84 @@ func nodeReplace2Kid(
 	nodeAppendKV(new, idx, ptr, key, nil)
 	nodeAppendRange(new, old, idx+1, idx+2, old.nkeys()-(idx+2))
 }
+
+// modes of the updates
+const (
+	MODE_UPSERT      = 0 // insert or replace
+	MODE_UPDATE_ONLY = 1 // update existing keys
+	MODE_INSERT_ONLY = 2 // only add new keys
+)
+
+type InsertReq struct {
+	tree *BTree
+
+	// out
+	Added   bool   // added a new key
+	Updated bool   // added a new key or an old key was changed
+	Old     []byte // the value before the update
+
+	// in
+	Key  []byte
+	Val  []byte
+	Mode int
+}
+
+// insert a KV into a node, the result might be split into 2 nodes.
+// the caller is responsible for deallocating the input node
+// and splitting and allocating result nodes.
+func treeInsert(req *InsertReq, node BNode) BNode {
+	// the result node.
+	// it's allowed to be bigger than 1 page and will be split if so
+	new := BNode{data: make([]byte, 2*BTREE_PAGE_SIZE)}
+	// where to insert the key?
+	idx := nodeLookupLE(node, req.Key)
+	// act depending on the node type
+	switch node.btype() {
+	case BNODE_LEAF:
+		// leaf, node.getKey(idx) <= key
+		if bytes.Equal(req.Key, node.getKey(idx)) {
+			// found the key, update it.
+			if req.Mode == MODE_INSERT_ONLY {
+				return BNode{}
+			}
+			old := node.getVal(idx)
+			if bytes.Equal(req.Val, old) {
+				return BNode{}
+			}
+			leafUpdate(new, node, idx, req.Key, req.Val)
+			req.Updated = true
+			req.Old = old
+		} else {
+			// insert it after the position.
+			if req.Mode == MODE_UPDATE_ONLY {
+				return BNode{}
+			}
+			leafInsert(new, node, idx+1, req.Key, req.Val)
+			req.Updated = true
+			req.Added = true
+		}
+		return new
+	case BNODE_NODE:
+		// internal node, insert it to a kid node.
+		return nodeInsert(req, new, node, idx)
+	default:
+		panic("bad node!")
+	}
+}
+
+// part of the treeInsert(): KV insertion to an internal node
+func nodeInsert(req *InsertReq, new BNode, node BNode, idx uint16) BNode {
+	// recursive insertion to the kid node
+	kptr := node.getPtr(idx)
+	updated := treeInsert(req, req.tree.get(kptr))
+	if len(updated.data) == 0 {
+		return BNode{}
+	}
+	// deallocate the kid node
+	req.tree.del(kptr)
+	// split the result
+	nsplit, splited := nodeSplit3(updated)
+	// update the kid links
+	nodeReplaceKidN(req.tree, new, node, idx, splited[:nsplit]...)
+	return new
+}
