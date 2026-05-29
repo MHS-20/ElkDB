@@ -5,14 +5,6 @@ import (
 	"encoding/binary"
 )
 
-// node format:
-// | type | nkeys |  pointers  |   offsets  | key-values
-// |  2B  |   2B  | nkeys * 8B | nkeys * 2B | ...
-
-// key-value format:
-// | klen | vlen | key | val |
-// |  2B  |  2B  | ... | ... |
-
 const HEADER = 4
 
 const (
