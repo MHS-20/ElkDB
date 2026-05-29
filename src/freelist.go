@@ -86,7 +86,7 @@ func (fl *FreeList) loadCache() {
 
 	fl.total = flTotal(fl)
 
-	// XXX: this is O(n)
+	// this is O(n)
 	head := fl.head
 	remain := fl.total
 	for remain > 0 {

@@ -11,6 +11,8 @@ import (
 	"syscall"
 )
 
+const DB_SIG = "ElkDB"
+
 type KV struct {
 	Path   string
 	NoSync bool
@@ -127,12 +129,6 @@ fail:
 	return fmt.Errorf("KV.Open: %w", err)
 }
 
-const DB_SIG = "BuildYourOwnDB13"
-
-// the master page format.
-// it contains the pointer to the root and other important bits.
-// | sig | btree_root | page_used | free_list | version |
-// | 16B |     8B     |     8B    |     8B    |    8B   |
 func masterLoad(db *KV) error {
 	if db.mmap.file == 0 {
 		// empty file, the master page will be created on the first write.
