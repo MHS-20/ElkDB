@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"sync"
 )
 
@@ -606,4 +607,223 @@ func (db *DB) Open() error {
 
 func (db *DB) Close() {
 	db.kv.Close()
+}
+
+// the iterator for range queries
+type Scanner struct {
+	// the range, from Key1 to Key2
+	Cmp1 int // CMP_??
+	Cmp2 int // optional
+	Key1 Record
+	Key2 Record // optional
+	// internal
+	tx      *DBReader
+	tdef    *TableDef
+	indexNo int    // -1: use the primary key; >= 0: use an index
+	iter    *BIter // the underlying B-tree iterator
+	keyEnd  []byte // the encoded Key2
+}
+
+// within the range or not?
+func (sc *Scanner) Valid() bool {
+	if !sc.iter.Valid() {
+		return false
+	}
+	key, _ := sc.iter.Deref()
+	return cmpOK(key, sc.Cmp2, sc.keyEnd)
+}
+
+// move the underlying B-tree iterator
+func (sc *Scanner) Next() {
+	assert(sc.Valid())
+	if sc.Cmp1 > 0 {
+		sc.iter.Next()
+	} else {
+		sc.iter.Prev()
+	}
+}
+
+// fetch the current row
+func (sc *Scanner) Deref(rec *Record) {
+	assert(sc.Valid())
+
+	tdef := sc.tdef
+	rec.Cols = tdef.Cols
+	rec.Vals = rec.Vals[:0]
+	key, val := sc.iter.Deref()
+
+	if sc.indexNo < 0 {
+		// primary key, decode the KV pair
+		for _, type_ := range tdef.Types {
+			rec.Vals = append(rec.Vals, Value{Type: type_})
+		}
+		decodeValues(key[4:], rec.Vals[:tdef.PKeys])
+		decodeValues(val, rec.Vals[tdef.PKeys:])
+	} else {
+		// secondary index
+		assert(len(val) == 0)
+
+		// decode the primary key first
+		index := tdef.Indexes[sc.indexNo]
+		ival := make([]Value, len(index))
+		for i, c := range index {
+			ival[i].Type = tdef.Types[colIndex(tdef, c)]
+		}
+		decodeValues(key[4:], ival)
+		icol := Record{index, ival}
+
+		// fetch the row by the primary key
+		rec.Cols = tdef.Cols[:tdef.PKeys]
+		for _, c := range rec.Cols {
+			rec.Vals = append(rec.Vals, *icol.Get(c))
+		}
+		// TODO: skip this if the index contains all the columns
+		ok, err := dbGet(sc.tx, tdef, rec)
+		assert(ok && err == nil)
+	}
+}
+
+func isPrefix(long []string, short []string) bool {
+	if len(long) < len(short) {
+		return false
+	}
+	for i, c := range short {
+		if long[i] != c {
+			return false
+		}
+	}
+	return true
+}
+
+func findIndex(tdef *TableDef, keys []string) (int, error) {
+	pk := tdef.Cols[:tdef.PKeys]
+	if isPrefix(pk, keys) {
+		// use the primary key.
+		// also works for full table scans without a key.
+		return -1, nil
+	}
+
+	// find a suitable index
+	winner := -2
+	for i, index := range tdef.Indexes {
+		if !isPrefix(index, keys) {
+			continue
+		}
+		if winner == -2 || len(index) < len(tdef.Indexes[winner]) {
+			winner = i
+		}
+	}
+	if winner == -2 {
+		return -2, fmt.Errorf("no index found")
+	}
+	return winner, nil
+}
+
+func colIndex(tdef *TableDef, col string) int {
+	for i, c := range tdef.Cols {
+		if c == col {
+			return i
+		}
+	}
+	return -1
+}
+
+// The range key can be a prefix of the index key,
+// we may have to encode missing columns to make the comparison work.
+func encodeKeyPartial(
+	out []byte, prefix uint32, values []Value,
+	tdef *TableDef, keys []string, cmp int,
+) []byte {
+	out = encodeKey(out, prefix, values)
+
+	// Encode the missing columns as either minimum or maximum values,
+	// depending on the comparison operator.
+	// 1. The empty string is lower than all possible value encodings,
+	//    thus we don't need to add anything for CMP_LT and CMP_GE.
+	// 2. The maximum encodings are all 0xff bytes.
+	max := cmp == CMP_GT || cmp == CMP_LE
+loop:
+	for i := len(values); max && i < len(keys); i++ {
+		switch tdef.Types[colIndex(tdef, keys[i])] {
+		case TYPE_BYTES:
+			out = append(out, 0xff)
+			break loop // stops here since no string encoding starts with 0xff
+		case TYPE_INT64:
+			out = append(out, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff)
+		default:
+			panic("what?")
+		}
+	}
+	return out
+}
+
+func dbScan(tx *DBReader, tdef *TableDef, req *Scanner) error {
+	// sanity checks
+	switch {
+	case req.Cmp1 > 0 && req.Cmp2 < 0:
+	case req.Cmp2 > 0 && req.Cmp1 < 0:
+	case req.Cmp1 != 0 && req.Cmp2 == 0 && len(req.Key2.Cols) == 0:
+	default:
+		return fmt.Errorf("bad range")
+	}
+	if req.Cmp2 != 0 && !reflect.DeepEqual(req.Key1.Cols, req.Key2.Cols) {
+		return fmt.Errorf("bad range key")
+	}
+	if err := checkRecordTypes(tdef, req.Key1); err != nil {
+		return err
+	}
+	if req.Cmp2 != 0 {
+		if err := checkRecordTypes(tdef, req.Key2); err != nil {
+			return err
+		}
+	}
+
+	// select an index
+	indexNo, err := findIndex(tdef, req.Key1.Cols)
+	if err != nil {
+		return err
+	}
+	index, prefix := tdef.Cols[:tdef.PKeys], tdef.Prefix
+	if indexNo >= 0 {
+		index, prefix = tdef.Indexes[indexNo], tdef.IndexPrefixes[indexNo]
+	}
+
+	req.tx = tx
+	req.tdef = tdef
+	req.indexNo = indexNo
+
+	// seek to the start key
+	keyStart := encodeKeyPartial(
+		nil, prefix, req.Key1.Vals, tdef, index, req.Cmp1,
+	)
+	req.iter = tx.kv.Seek(keyStart, req.Cmp1)
+
+	// the end key
+	if req.Cmp2 == 0 {
+		// no end; the range is bounded by the prefix
+		switch req.Cmp1 {
+		case CMP_GE, CMP_GT:
+			req.Cmp2 = CMP_LT
+			req.keyEnd = encodeKey(nil, prefix+1, nil)
+		case CMP_LE, CMP_LT:
+			req.Cmp2 = CMP_GT
+			req.keyEnd = encodeKey(nil, prefix, nil)
+		default:
+			panic("unreachable")
+		}
+	} else {
+		req.keyEnd = encodeKeyPartial(
+			nil, prefix, req.Key2.Vals, tdef, index, req.Cmp2,
+		)
+	}
+	return nil
+}
+
+// range query
+func (tx *DBReader) Scan(table string, req *Scanner) error {
+	tdef := getTableDef(tx, table)
+	if tdef == nil {
+		return fmt.Errorf("table not found: %s", table)
+	}
+	return dbScan(tx, tdef, req)
 }
