@@ -267,7 +267,8 @@ func writePages(tx *KVTX) error {
 	tx.mmap.chunks = db.mmap.chunks
 	for ptr, page := range tx.page.updates {
 		if page != nil {
-			copy(tx.PageGet(ptr).Data, page)
+			copy(pageGetMapped(tx.mmap.chunks, ptr).Data, page)
+			//	copy(tx.PageGet(ptr).Data, page)
 		}
 	}
 	return nil

@@ -14,14 +14,10 @@ func TestBTreeIter(t *testing.T) {
 		is.False(t, iter.Valid())
 	}
 
-	sizes := []int{5, 2500}
-	for _, sz := range sizes {
+	for _, sz := range []int{5, 2500} {
 		c := newC()
-
 		for i := 0; i < sz; i++ {
-			key := fmt.Sprintf("key%010d", i)
-			val := fmt.Sprintf("vvv%d", fmix32(uint32(-i)))
-			c.add(key, val)
+			c.add(fmt.Sprintf("key%010d", i), fmt.Sprintf("vvv%d", fmix32(uint32(-i))))
 		}
 		c.verify(t)
 
@@ -29,7 +25,6 @@ func TestBTreeIter(t *testing.T) {
 		for i := 0; i < sz; i++ {
 			key := []byte(fmt.Sprintf("key%010d", i))
 			val := []byte(fmt.Sprintf("vvv%d", fmix32(uint32(-i))))
-			// fmt.Println(i, string(key), val)
 
 			iter := c.tree.SeekLE(key)
 			is.True(t, iter.Valid())
@@ -48,12 +43,10 @@ func TestBTreeIter(t *testing.T) {
 			}
 
 			iter.Next()
-			{
-				is.True(t, iter.Valid())
-				gotk, gotv := iter.Deref()
-				is.Equal(t, key, gotk)
-				is.Equal(t, val, gotv)
-			}
+			gotk, gotv = iter.Deref()
+			is.True(t, iter.Valid())
+			is.Equal(t, key, gotk)
+			is.Equal(t, val, gotv)
 
 			if i+1 == sz {
 				iter.Next()

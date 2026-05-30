@@ -3,6 +3,7 @@ package kv
 import (
 	"testing"
 
+	"github.com/MHS-20/ElkDB/btree"
 	is "github.com/stretchr/testify/require"
 )
 
@@ -14,25 +15,26 @@ func TestKVTX(t *testing.T) {
 	tx := KVTX{}
 	d.db.Begin(&tx)
 
-	tx.Update(&InsertReq{Key: []byte("k1"), Val: []byte("xxx")})
-	tx.Update(&InsertReq{Key: []byte("k2"), Val: []byte("xxx")})
+	tx.Update(&btree.InsertReq{Key: []byte("k1"), Val: []byte("xxx")})
+	tx.Update(&btree.InsertReq{Key: []byte("k2"), Val: []byte("xxx")})
 
 	val, ok := tx.Get([]byte("k1"))
 	is.True(t, ok)
 	is.Equal(t, []byte("xxx"), val)
 	val, ok = tx.Get([]byte("k2"))
+	is.True(t, ok)
 	is.Equal(t, []byte("xxx"), val)
 
 	d.db.Abort(&tx)
-
 	d.verify(t)
 
 	d.reopen()
 	d.verify(t)
+
 	{
 		tx := KVTX{}
 		d.db.Begin(&tx)
-		val, ok = tx.Get([]byte("k2"))
+		_, ok = tx.Get([]byte("k2"))
 		is.False(t, ok)
 		d.db.Abort(&tx)
 	}
@@ -53,9 +55,9 @@ func TestKVRW(t *testing.T) {
 			d.db.BeginRead(&r1)
 
 			d.add("k2", "v2")
-			val, ok := r1.Get([]byte("k2"))
+			_, ok := r1.Get([]byte("k2"))
 			assert(!ok)
-			val, ok = r1.Get([]byte("k1"))
+			val, ok := r1.Get([]byte("k1"))
 			assert(ok && string(val) == "v1")
 
 			d.db.EndRead(&r1)
