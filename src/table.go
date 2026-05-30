@@ -3,6 +3,7 @@ package elk
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"sync"
 )
@@ -257,4 +258,211 @@ func decodeValues(in []byte, out []Value) {
 		}
 	}
 	assert(len(in) == 0)
+}
+
+func (rec *Record) Get(key string) *Value {
+	for i, c := range rec.Cols {
+		if c == key {
+			return &rec.Vals[i]
+		}
+	}
+	return nil
+}
+
+// get a single row by the primary key
+func dbGet(tx *DBReader, tdef *TableDef, rec *Record) (bool, error) {
+	// just a shortcut for the scan operation
+	sc := Scanner{
+		Cmp1: CMP_GE,
+		Cmp2: CMP_LE,
+		Key1: *rec,
+		Key2: *rec,
+	}
+	if err := dbScan(tx, tdef, &sc); err != nil {
+		return false, err
+	}
+	if sc.Valid() {
+		sc.Deref(rec)
+		sc.Next()
+		assert(!sc.Valid()) // incomplete key
+		return true, nil
+	} else {
+		return false, nil
+	}
+}
+
+// internal table: metadata
+var TDEF_META = &TableDef{
+	Prefix: 1,
+	Name:   "@meta",
+	Types:  []uint32{TYPE_BYTES, TYPE_BYTES},
+	Cols:   []string{"key", "val"},
+	PKeys:  1,
+}
+
+// internal table: table schemas
+var TDEF_TABLE = &TableDef{
+	Prefix: 2,
+	Name:   "@table",
+	Types:  []uint32{TYPE_BYTES, TYPE_BYTES},
+	Cols:   []string{"name", "def"},
+	PKeys:  1,
+}
+
+var INTERNAL_TABLES map[string]*TableDef = map[string]*TableDef{
+	"@meta":  TDEF_META,
+	"@table": TDEF_TABLE,
+}
+
+// get the table definition by name
+func getTableDef(tx *DBReader, name string) *TableDef {
+	if tdef, ok := INTERNAL_TABLES[name]; ok {
+		return tdef // expose internal tables
+	}
+
+	db := tx.db
+	db.mu.Lock()
+	tdef, ok := db.tables[name]
+	db.mu.Unlock()
+
+	if !ok {
+		tdef = getTableDefDB(tx, name)
+		db.mu.Lock()
+		if db.tables == nil {
+			db.tables = map[string]*TableDef{}
+		}
+		if tdef != nil {
+			db.tables[name] = tdef
+		}
+		db.mu.Unlock()
+	}
+	return tdef
+}
+
+func getTableDefDB(tx *DBReader, name string) *TableDef {
+	rec := (&Record{}).AddStr("name", []byte(name))
+	ok, err := dbGet(tx, TDEF_TABLE, rec)
+	assert(err == nil)
+	if !ok {
+		return nil
+	}
+
+	tdef := &TableDef{}
+	err = json.Unmarshal(rec.Get("def").Str, tdef)
+	assert(err == nil)
+	return tdef
+}
+
+// get a single row by the primary key
+func (tx *DBReader) Get(table string, rec *Record) (bool, error) {
+	tdef := getTableDef(tx, table)
+	if tdef == nil {
+		return false, fmt.Errorf("table not found: %s", table)
+	}
+
+	// check and reorder the primary key
+	values, err := checkRecord(tdef, *rec, tdef.PKeys)
+	if err != nil {
+		return false, err
+	}
+	rec.Cols = tdef.Cols[:tdef.PKeys]
+	rec.Vals = values[:tdef.PKeys]
+
+	return dbGet(tx, tdef, rec)
+}
+
+const TABLE_PREFIX_MIN = 100
+
+func tableDefCheck(tdef *TableDef) error {
+	// verify the table definition
+	bad := tdef.Name == "" || len(tdef.Cols) == 0
+	bad = bad || len(tdef.Cols) != len(tdef.Types)
+	bad = bad || !(1 <= tdef.PKeys && int(tdef.PKeys) <= len(tdef.Cols))
+	if bad {
+		return fmt.Errorf("bad table definition: %s", tdef.Name)
+	}
+	// verify the indexes
+	for i, index := range tdef.Indexes {
+		index, err := checkIndexKeys(tdef, index)
+		if err != nil {
+			return err
+		}
+		tdef.Indexes[i] = index
+	}
+	return nil
+}
+
+func checkIndexKeys(tdef *TableDef, index []string) ([]string, error) {
+	icols := map[string]bool{}
+	for _, c := range index {
+		// check the index columns
+		if colIndex(tdef, c) < 0 {
+			return nil, fmt.Errorf("unknown index column: %s", c)
+		}
+		if icols[c] {
+			return nil, fmt.Errorf("duplicated column in index: %s", c)
+		}
+		icols[c] = true
+	}
+	// add the primary key to the index
+	for _, c := range tdef.Cols[:tdef.PKeys] {
+		if !icols[c] {
+			index = append(index, c)
+		}
+	}
+	assert(len(index) < len(tdef.Cols))
+	return index, nil
+}
+
+// create a new table
+func (tx *DBTX) TableNew(tdef *TableDef) error {
+	if err := tableDefCheck(tdef); err != nil {
+		return err
+	}
+
+	// check the existing table
+	table := (&Record{}).AddStr("name", []byte(tdef.Name))
+	ok, err := dbGet(&tx.DBReader, TDEF_TABLE, table)
+	assert(err == nil)
+	if ok {
+		return fmt.Errorf("table exists: %s", tdef.Name)
+	}
+
+	// allocate new prefixes
+	assert(tdef.Prefix == 0)
+	tdef.Prefix = TABLE_PREFIX_MIN
+	meta := (&Record{}).AddStr("key", []byte("next_prefix"))
+	ok, err = dbGet(&tx.DBReader, TDEF_META, meta)
+	assert(err == nil)
+	if ok {
+		tdef.Prefix = binary.LittleEndian.Uint32(meta.Get("val").Str)
+		assert(tdef.Prefix > TABLE_PREFIX_MIN)
+	} else {
+		meta.AddStr("val", make([]byte, 4))
+	}
+	for i := range tdef.Indexes {
+		prefix := tdef.Prefix + 1 + uint32(i)
+		tdef.IndexPrefixes = append(tdef.IndexPrefixes, prefix)
+	}
+
+	// update the next prefix
+	ntree := 1 + uint32(len(tdef.Indexes))
+	binary.LittleEndian.PutUint32(meta.Get("val").Str, tdef.Prefix+ntree)
+	err = dbUpdate(tx, TDEF_META, &DBSetReq{Record: *meta})
+	if err != nil {
+		return err
+	}
+
+	// store the definition
+	if tdef.Indexes == nil {
+		tdef.Indexes = [][]string{}
+	}
+	if tdef.IndexPrefixes == nil {
+		tdef.IndexPrefixes = []uint32{}
+	}
+	val, err := json.Marshal(tdef)
+	assert(err == nil)
+	table.AddStr("def", val)
+	err = dbUpdate(tx, TDEF_TABLE, &DBSetReq{Record: *table})
+	return err
 }
