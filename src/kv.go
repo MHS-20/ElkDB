@@ -143,7 +143,8 @@ func masterLoad(db *KV) error {
 	version := binary.LittleEndian.Uint64(data[40:])
 
 	// verify the page
-	if !bytes.Equal([]byte(DB_SIG), data[:16]) {
+	if !bytes.Equal([]byte(DB_SIG), data[:len(DB_SIG)]) {
+		// if !bytes.Equal([]byte(DB_SIG), data[:16]) {
 		return errors.New("Bad signature.")
 	}
 	bad := !(1 <= used && used <= uint64(db.mmap.file/BTREE_PAGE_SIZE))
