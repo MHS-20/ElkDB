@@ -1,4 +1,4 @@
-package elk
+package kv
 
 import (
 	"testing"

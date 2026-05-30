@@ -1,21 +1,24 @@
-package elk
+package btree
 
 import "bytes"
 
-// B-tree iterator
+// BIter is a cursor over a BTree.
+// It holds a path from the root down to a leaf, plus an index at each level.
 type BIter struct {
 	tree *BTree
-	path []BNode  // from root to leaf
-	pos  []uint16 // indexes into nodes
+	path []BNode  // nodes from root to current leaf
+	pos  []uint16 // index into each node along the path
 }
 
+// Comparison modes for Seek.
 const (
-	CMP_GE = +3 // >=
-	CMP_GT = +2 // >
-	CMP_LT = -2 // <
-	CMP_LE = -3 // <=
+	CmpGE = +3 // >=
+	CmpGT = +2 // >
+	CmpLT = -2 // <
+	CmpLE = -3 // <=
 )
 
+// Clone returns a deep copy of the iterator.
 func (iter *BIter) Clone() *BIter {
 	return &BIter{
 		tree: iter.tree,
@@ -24,7 +27,7 @@ func (iter *BIter) Clone() *BIter {
 	}
 }
 
-// current KV pair
+// Deref returns the key and value at the current position.
 func (iter *BIter) Deref() ([]byte, []byte) {
 	assert(iter.Valid())
 	return iterDeref(iter)
@@ -37,11 +40,13 @@ func iterDeref(iter *BIter) ([]byte, []byte) {
 	return node.getKey(pos), node.getVal(pos)
 }
 
+// Valid reports whether the iterator points to a real (non-dummy) key.
 func (iter *BIter) Valid() bool {
 	return !iterDummy(iter) && iterInRange(iter)
 }
 
-// the first key in the tree is dummy
+// iterDummy returns true when every position is zero, which means the iterator
+// is sitting on the synthetic sentinel key at the start of the tree.
 func iterDummy(iter *BIter) bool {
 	for _, pos := range iter.pos {
 		if pos != 0 {
@@ -59,17 +64,16 @@ func iterInRange(iter *BIter) bool {
 
 func iterPrev(iter *BIter, level int) {
 	if iter.pos[level] > 0 {
-		iter.pos[level]-- // move within this node
+		iter.pos[level]--
 	} else if level > 0 {
-		iterPrev(iter, level-1) // move to a slibing node
+		iterPrev(iter, level-1) // move to a sibling node
 	} else {
-		return // dummy key
+		return // already at the dummy key
 	}
 
 	if level+1 < len(iter.pos) {
-		// update the kid node
 		node := iter.path[level]
-		kid := iter.tree.get(node.getPtr(iter.pos[level]))
+		kid := iter.tree.Store.PageGet(node.getPtr(iter.pos[level]))
 		iter.path[level+1] = kid
 		iter.pos[level+1] = kid.nkeys() - 1
 	}
@@ -81,35 +85,37 @@ func iterNext(iter *BIter, level int) {
 	} else if level > 0 {
 		iterNext(iter, level-1)
 	} else {
-		iter.pos[len(iter.pos)-1]++ // past the last key
+		iter.pos[len(iter.pos)-1]++ // step past the last key
 		return
 	}
 
 	if level+1 < len(iter.pos) {
 		node := iter.path[level]
-		kid := iter.tree.get(node.getPtr(iter.pos[level]))
+		kid := iter.tree.Store.PageGet(node.getPtr(iter.pos[level]))
 		iter.path[level+1] = kid
 		iter.pos[level+1] = 0
 	}
 }
 
+// Prev moves the iterator one step backward.
 func (iter *BIter) Prev() {
 	iterPrev(iter, len(iter.path)-1)
 }
 
+// Next moves the iterator one step forward.
 func (iter *BIter) Next() {
 	iterNext(iter, len(iter.path)-1)
 }
 
-// find the closest position that is less or equal to the input key
+// SeekLE positions the iterator at the largest key <= the given key.
 func (tree *BTree) SeekLE(key []byte) *BIter {
 	iter := &BIter{tree: tree}
-	for ptr := tree.root; ptr != 0; {
-		node := tree.get(ptr)
+	for ptr := tree.Root; ptr != 0; {
+		node := tree.Store.PageGet(ptr)
 		idx := nodeLookupLE(node, key)
 		iter.path = append(iter.path, node)
 		iter.pos = append(iter.pos, idx)
-		if node.btype() == BNODE_NODE {
+		if node.btype() == BNodeInternal {
 			ptr = node.getPtr(idx)
 		} else {
 			ptr = 0
@@ -118,35 +124,34 @@ func (tree *BTree) SeekLE(key []byte) *BIter {
 	return iter
 }
 
-// key cmp ref
-func cmpOK(key []byte, cmp int, ref []byte) bool {
+// CmpOK reports whether the comparison "key cmp ref" holds.
+func CmpOK(key []byte, cmp int, ref []byte) bool {
 	r := bytes.Compare(key, ref)
 	switch cmp {
-	case CMP_GE:
+	case CmpGE:
 		return r >= 0
-	case CMP_GT:
+	case CmpGT:
 		return r > 0
-	case CMP_LT:
+	case CmpLT:
 		return r < 0
-	case CMP_LE:
+	case CmpLE:
 		return r <= 0
 	default:
-		panic("what?")
+		panic("unknown cmp value")
 	}
 }
 
-// find the closest position to a key with respect to the `cmp` relation
+// Seek positions the iterator at the key nearest to key satisfying cmp.
 func (tree *BTree) Seek(key []byte, cmp int) *BIter {
 	iter := &BIter{tree: tree}
-	if tree.root == 0 { // ← add this guard
+	if tree.Root == 0 {
 		return iter
 	}
 
 	iter = tree.SeekLE(key)
-	if cmp != CMP_LE && iterInRange(iter) {
+	if cmp != CmpLE && iterInRange(iter) {
 		cur, _ := iterDeref(iter)
-		if !cmpOK(cur, cmp, key) {
-			// off by one
+		if !CmpOK(cur, cmp, key) {
 			if cmp > 0 {
 				iter.Next()
 			} else {
@@ -156,7 +161,7 @@ func (tree *BTree) Seek(key []byte, cmp int) *BIter {
 	}
 	if iter.Valid() {
 		cur, _ := iter.Deref()
-		assert(cmpOK(cur, cmp, key))
+		assert(CmpOK(cur, cmp, key))
 	}
 	return iter
 }

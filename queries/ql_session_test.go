@@ -1,4 +1,4 @@
-package elk
+package queries
 
 // Tests the *complete* client pipeline:
 //
