@@ -466,3 +466,144 @@ func (tx *DBTX) TableNew(tdef *TableDef) error {
 	err = dbUpdate(tx, TDEF_TABLE, &DBSetReq{Record: *table})
 	return err
 }
+
+type DBSetReq struct {
+	// in
+	Record Record
+	Mode   int
+	// out
+	Updated bool
+	Added   bool
+}
+
+// add a row to the table
+// FIXME: check key length
+func dbUpdate(tx *DBTX, tdef *TableDef, dbreq *DBSetReq) error {
+	values, err := checkRecord(tdef, dbreq.Record, len(tdef.Cols))
+	if err != nil {
+		return err
+	}
+
+	// by the primary key
+	key := encodeKey(nil, tdef.Prefix, values[:tdef.PKeys])
+	val := encodeValues(nil, values[tdef.PKeys:])
+	req := InsertReq{Key: key, Val: val, Mode: dbreq.Mode}
+	_ = tx.kv.Update(&req)
+
+	// stats
+	dbreq.Added, dbreq.Updated = req.Added, req.Updated
+	if !req.Updated || len(tdef.Indexes) == 0 {
+		return nil
+	}
+
+	// maintain indexes
+	if req.Updated && !req.Added {
+		decodeValues(req.Old, values[tdef.PKeys:]) // get the old row
+		indexOp(tx, tdef, Record{tdef.Cols, values}, INDEX_DEL)
+	}
+	if req.Updated {
+		indexOp(tx, tdef, dbreq.Record, INDEX_ADD)
+	}
+	return nil
+}
+
+const (
+	INDEX_ADD = 1
+	INDEX_DEL = 2
+)
+
+// maintain indexes after a record is added or removed
+func indexOp(tx *DBTX, tdef *TableDef, rec Record, op int) {
+	key := make([]byte, 0, 256)
+	irec := make([]Value, len(tdef.Cols))
+	for i, index := range tdef.Indexes {
+		// the indexed key
+		for j, c := range index {
+			irec[j] = *rec.Get(c)
+		}
+		// update the KV store
+		key = encodeKey(key[:0], tdef.IndexPrefixes[i], irec[:len(index)])
+		done := false
+		switch op {
+		case INDEX_ADD:
+			done = tx.kv.Update(&InsertReq{Key: key})
+		case INDEX_DEL:
+			done = tx.kv.Del(&DeleteReq{Key: key})
+		default:
+			panic("what?")
+		}
+		assert(done)
+	}
+}
+
+// add a record
+func (tx *DBTX) Set(table string, req *DBSetReq) error {
+	tdef := getTableDef(&tx.DBReader, table)
+	if tdef == nil {
+		return fmt.Errorf("table not found: %s", table)
+	}
+	return dbUpdate(tx, tdef, req)
+}
+
+func (tx *DBTX) Insert(table string, rec Record) (bool, error) {
+	req := DBSetReq{Record: rec, Mode: MODE_INSERT_ONLY}
+	err := tx.Set(table, &req)
+	return req.Added, err
+}
+
+func (tx *DBTX) Update(table string, rec Record) (bool, error) {
+	req := DBSetReq{Record: rec, Mode: MODE_UPDATE_ONLY}
+	err := tx.Set(table, &req)
+	return req.Added, err
+}
+
+func (tx *DBTX) Upsert(table string, rec Record) (bool, error) {
+	req := DBSetReq{Record: rec, Mode: MODE_UPSERT}
+	err := tx.Set(table, &req)
+	return req.Added, err
+}
+
+// delete a record by its primary key
+// FIXME: check key length
+func dbDelete(tx *DBTX, tdef *TableDef, rec Record) (bool, error) {
+	values, err := checkRecord(tdef, rec, tdef.PKeys)
+	if err != nil {
+		return false, err
+	}
+
+	// delete the record
+	key := encodeKey(nil, tdef.Prefix, values[:tdef.PKeys])
+	req := DeleteReq{Key: key}
+	deleted := tx.kv.Del(&req)
+	if !deleted || len(tdef.Indexes) == 0 {
+		return deleted, nil
+	}
+
+	// maintain indexes
+	if deleted {
+		for i := tdef.PKeys; i < len(tdef.Types); i++ {
+			values[i].Type = tdef.Types[i]
+		}
+		decodeValues(req.Old, values[tdef.PKeys:]) // get the old row
+		indexOp(tx, tdef, Record{tdef.Cols, values}, INDEX_DEL)
+	}
+	return true, nil
+}
+
+// remove a record
+func (tx *DBTX) Delete(table string, rec Record) (bool, error) {
+	tdef := getTableDef(&tx.DBReader, table)
+	if tdef == nil {
+		return false, fmt.Errorf("table not found: %s", table)
+	}
+	return dbDelete(tx, tdef, rec)
+}
+
+func (db *DB) Open() error {
+	db.kv.Path = db.Path
+	return db.kv.Open()
+}
+
+func (db *DB) Close() {
+	db.kv.Close()
+}
