@@ -555,7 +555,7 @@ func (tx *DBTX) Insert(table string, rec Record) (bool, error) {
 func (tx *DBTX) Update(table string, rec Record) (bool, error) {
 	req := DBSetReq{Record: rec, Mode: MODE_UPDATE_ONLY}
 	err := tx.Set(table, &req)
-	return req.Added, err
+	return req.Updated, err
 }
 
 func (tx *DBTX) Upsert(table string, rec Record) (bool, error) {

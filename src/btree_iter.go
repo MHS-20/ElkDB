@@ -137,7 +137,12 @@ func cmpOK(key []byte, cmp int, ref []byte) bool {
 
 // find the closest position to a key with respect to the `cmp` relation
 func (tree *BTree) Seek(key []byte, cmp int) *BIter {
-	iter := tree.SeekLE(key)
+	iter := &BIter{tree: tree}
+	if tree.root == 0 { // ← add this guard
+		return iter
+	}
+
+	iter = tree.SeekLE(key)
 	if cmp != CMP_LE && iterInRange(iter) {
 		cur, _ := iterDeref(iter)
 		if !cmpOK(cur, cmp, key) {
