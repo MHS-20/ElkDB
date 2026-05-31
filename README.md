@@ -180,7 +180,7 @@ The program dials the server, checks reachability with a ping, issues a `CREATE 
 
 ---
 
-## Running ElkDB
+## Running ElkDB Locally
 
 ### Start the server
 
@@ -202,14 +202,36 @@ Remote mode connects to a running server:
 ./elkdb -remote localhost:5433
 ```
 
-### Run the tests
+## Running ElkDB with Docker
 
+Pull the latest image:
+
+```bash
+docker pull ghcr.io/MHS-20/elkdb:latest
 ```
-go test ./...
+
+Run with a named volume so your data survives container restarts:
+
+```bash
+docker run -d \
+  -p 5433:5433 \
+  -v elkdb-data:/data \
+  --name elkdb \
+  ghcr.io/MHS-20/elkdb:latest
 ```
 
-The test suite starts real server instances on random free ports, runs all CRUD operations end-to-end, tests codec correctness without a network, verifies persistence across reconnections, and checks concurrent client isolation.
+Then connect with the CLI:
 
+```bash
+./elkdb -remote localhost:5433
+```
+
+> **Data** is stored in the `/data` volume. To back it up, copy `/data/elkdb.db` out of the container:
+>
+> ```bash
+> docker cp elkdb:/data/elkdb.db ./elkdb.db
+> ```
+>
 ---
 
 ## Limitations
