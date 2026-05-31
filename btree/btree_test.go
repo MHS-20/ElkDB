@@ -1,8 +1,8 @@
 package btree
 
 import (
+	"crypto/rand"
 	"fmt"
-	"math/rand"
 	"sort"
 	"testing"
 	"unsafe"
@@ -34,49 +34,49 @@ func (s *testStore) PageDel(ptr uint64) {
 	delete(s.pages, ptr)
 }
 
-type C struct {
+type btreeTester struct {
 	tree  BTree
 	ref   map[string]string
 	store *testStore
 }
 
-func newC() *C {
+func newBTreeTester() *btreeTester {
 	store := &testStore{pages: map[uint64]BNode{}}
-	return &C{
+	return &btreeTester{
 		tree:  BTree{Store: store},
 		ref:   map[string]string{},
 		store: store,
 	}
 }
 
-func (c *C) add(key, val string) {
-	c.tree.Insert([]byte(key), []byte(val))
-	c.ref[key] = val
+func (btt *btreeTester) add(key, val string) {
+	btt.tree.Insert([]byte(key), []byte(val))
+	btt.ref[key] = val
 }
 
-func (c *C) del(key string) bool {
-	delete(c.ref, key)
-	return c.tree.Delete([]byte(key))
+func (btt *btreeTester) del(key string) bool {
+	delete(btt.ref, key)
+	return btt.tree.Delete([]byte(key))
 }
 
-func (c *C) dump() ([]string, []string) {
+func (btt *btreeTester) dump() ([]string, []string) {
 	keys, vals := []string{}, []string{}
 	var nodeDump func(uint64)
 	nodeDump = func(ptr uint64) {
-		node := c.store.PageGet(ptr)
+		node := btt.store.PageGet(ptr)
 		nkeys := node.nkeys()
 		if node.btype() == BNodeLeaf {
-			for i := uint16(0); i < nkeys; i++ {
+			for i := range nkeys {
 				keys = append(keys, string(node.getKey(i)))
 				vals = append(vals, string(node.getVal(i)))
 			}
 		} else {
-			for i := uint16(0); i < nkeys; i++ {
+			for i := range nkeys {
 				nodeDump(node.getPtr(i))
 			}
 		}
 	}
-	nodeDump(c.tree.Root)
+	nodeDump(btt.tree.Root)
 	assert(keys[0] == "")
 	assert(vals[0] == "")
 	return keys[1:], vals[1:]
@@ -92,10 +92,10 @@ func (s sortIF) Len() int           { return s.len }
 func (s sortIF) Less(i, j int) bool { return s.less(i, j) }
 func (s sortIF) Swap(i, j int)      { s.swap(i, j) }
 
-func (c *C) verify(t *testing.T) {
-	keys, vals := c.dump()
+func (btt *btreeTester) verify(t *testing.T) {
+	keys, vals := btt.dump()
 	rkeys, rvals := []string{}, []string{}
-	for k, v := range c.ref {
+	for k, v := range btt.ref {
 		rkeys = append(rkeys, k)
 		rvals = append(rvals, v)
 	}
@@ -117,13 +117,13 @@ func (c *C) verify(t *testing.T) {
 		if node.btype() == BNodeLeaf {
 			return
 		}
-		for i := uint16(0); i < nkeys; i++ {
-			kid := c.store.PageGet(node.getPtr(i))
+		for i := range nkeys {
+			kid := btt.store.PageGet(node.getPtr(i))
 			is.Equal(t, node.getKey(i), kid.getKey(0))
 			nodeVerify(kid)
 		}
 	}
-	nodeVerify(c.store.PageGet(c.tree.Root))
+	nodeVerify(btt.store.PageGet(btt.tree.Root))
 }
 
 func fmix32(h uint32) uint32 {
@@ -136,58 +136,58 @@ func fmix32(h uint32) uint32 {
 }
 
 func TestBTreeBasic(t *testing.T) {
-	c := newC()
-	c.add("k", "v")
-	c.verify(t)
+	btt := newBTreeTester()
+	btt.add("k", "v")
+	btt.verify(t)
 
-	for i := 0; i < 250000; i++ {
+	for i := range 250000 {
 		key := fmt.Sprintf("key%d", fmix32(uint32(i)))
 		val := fmt.Sprintf("vvv%d", fmix32(uint32(-i)))
-		c.add(key, val)
+		btt.add(key, val)
 		if i < 2000 {
-			c.verify(t)
+			btt.verify(t)
 		}
 	}
-	c.verify(t)
+	btt.verify(t)
 
 	for i := 2000; i < 250000; i++ {
 		key := fmt.Sprintf("key%d", fmix32(uint32(i)))
-		is.True(t, c.del(key))
+		is.True(t, btt.del(key))
 	}
-	c.verify(t)
+	btt.verify(t)
 
-	for i := 0; i < 2000; i++ {
+	for i := range 2000 {
 		key := fmt.Sprintf("key%d", fmix32(uint32(i)))
 		val := fmt.Sprintf("vvv%d", fmix32(uint32(+i)))
-		c.add(key, val)
-		c.verify(t)
+		btt.add(key, val)
+		btt.verify(t)
 	}
-	for i := 0; i < 2000; i++ {
-		root := c.tree.Root
-		c.add("k", "v")
-		is.Equal(t, root, c.tree.Root)
+	for range 2000 {
+		root := btt.tree.Root
+		btt.add("k", "v")
+		is.Equal(t, root, btt.tree.Root)
 	}
 
-	is.False(t, c.del("kk"))
+	is.False(t, btt.del("kk"))
 
-	for i := 0; i < 2000; i++ {
+	for i := range 2000 {
 		key := fmt.Sprintf("key%d", fmix32(uint32(i)))
-		is.True(t, c.del(key))
-		c.verify(t)
+		is.True(t, btt.del(key))
+		btt.verify(t)
 	}
 
-	c.add("k", "v2")
-	c.verify(t)
-	c.del("k")
-	c.verify(t)
+	btt.add("k", "v2")
+	btt.verify(t)
+	btt.del("k")
+	btt.verify(t)
 
-	is.Equal(t, 1, len(c.store.pages))
-	is.Equal(t, uint16(1), c.store.PageGet(c.tree.Root).nkeys())
+	is.Equal(t, 1, len(btt.store.pages))
+	is.Equal(t, uint16(1), btt.store.PageGet(btt.tree.Root).nkeys())
 }
 
 func TestBTreeRandLength(t *testing.T) {
-	c := newC()
-	for i := 0; i < 2000; i++ {
+	btt := newBTreeTester()
+	for i := range 2000 {
 		klen := fmix32(uint32(2*i+0)) % MaxKeySize
 		vlen := fmix32(uint32(2*i+1)) % MaxValSize
 		if klen == 0 {
@@ -196,33 +196,24 @@ func TestBTreeRandLength(t *testing.T) {
 		key := make([]byte, klen)
 		rand.Read(key)
 		val := make([]byte, vlen)
-		c.add(string(key), string(val))
-		c.verify(t)
+		btt.add(string(key), string(val))
+		btt.verify(t)
 	}
 }
 
 func TestBTreeIncLength(t *testing.T) {
 	for l := 1; l < MaxKeySize+MaxValSize; l++ {
-		c := newC()
-		klen := l
-		if klen > MaxKeySize {
-			klen = MaxKeySize
-		}
+		btt := newBTreeTester()
+		klen := min(l, MaxKeySize)
 		vlen := l - klen
 		key := make([]byte, klen)
 		val := make([]byte, vlen)
 		factor := PageSize / l
-		size := factor * factor * 2
-		if size > 4000 {
-			size = 4000
-		}
-		if size < 10 {
-			size = 10
-		}
-		for i := 0; i < size; i++ {
+		size := max(min(factor*factor*2, 4000), 10)
+		for range size {
 			rand.Read(key)
-			c.add(string(key), string(val))
+			btt.add(string(key), string(val))
 		}
-		c.verify(t)
+		btt.verify(t)
 	}
 }

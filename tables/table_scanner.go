@@ -15,15 +15,8 @@ import (
 // Callers initialise Cmp1, Cmp2, Key1, and Key2, then pass the Scanner to
 // DBReader.Scan.  After Scan returns they iterate with Valid / Next / Deref.
 //
-// Scanning in ascending order:
-//
-//	sc := Scanner{Cmp1: btree.CmpGE, Cmp2: btree.CmpLE, Key1: lo, Key2: hi}
-//	tx.Scan(table, &sc)
-//	for ; sc.Valid(); sc.Next() { sc.Deref(&rec) }
-//
-// Scanning in descending order swap Cmp1/Cmp2:
-//
-//	sc := Scanner{Cmp1: btree.CmpLE, Cmp2: btree.CmpGE, Key1: hi, Key2: lo}
+// Scanning can be in ascending or descending order:
+
 type Scanner struct {
 	// Bounds configured by the caller.
 	Cmp1 int // starting comparison: btree.CmpGE or btree.CmpLE

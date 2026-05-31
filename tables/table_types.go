@@ -1,3 +1,7 @@
+// Package tables builds a relational layer on top of the kv store.
+// It manages table schemas, encodes rows as ordered byte keys, and maintains
+// secondary indexes. Each operation runs inside a transaction,
+// so that schema changes and data mutations are always atomic.
 package tables
 
 import (
@@ -76,8 +80,8 @@ func (db *DB) Begin(tx *DBTX) {
 	// Wire the embedded DBReader so that read methods (Get, Scan, TableDef)
 	// see in-transaction writes via the same kv.Writer.
 	tx.DBReader.db = db
-	tx.DBReader.kvr = w
-	tx.DBReader.kvtx = nil // not a standalone read tx; EndRead must not be called
+	tx.kvr = w
+	tx.kvtx = nil // not a standalone read tx; EndRead must not be called
 }
 
 // Commit persists the transaction.
@@ -201,7 +205,7 @@ const tablePrefixMin = uint32(100)
 func tableDefCheck(tdef *TableDef) error {
 	bad := tdef.Name == "" || len(tdef.Cols) == 0
 	bad = bad || len(tdef.Cols) != len(tdef.Types)
-	bad = bad || !(1 <= tdef.PKeys && tdef.PKeys <= len(tdef.Cols))
+	bad = bad || (1 > tdef.PKeys || tdef.PKeys > len(tdef.Cols))
 	if bad {
 		return fmt.Errorf("bad table definition: %s", tdef.Name)
 	}

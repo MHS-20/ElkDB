@@ -3,7 +3,7 @@ package kv
 import (
 	"container/heap"
 	"fmt"
-	"sort"
+	"slices"
 
 	"github.com/MHS-20/ElkDB/btree"
 )
@@ -90,7 +90,7 @@ func (tx *KVReader) Seek(key []byte, cmp int) *btree.BIter {
 // It satisfies both kv.Reader and kv.Writer.
 type KVTX struct {
 	KVReader // embedded snapshot (provides Get, Seek, PageGet for committed pages)
-	db       *KV
+	kv       *KV
 	free     *btree.FreeList
 	page     struct {
 		nappend int               // number of pages to append to the file
@@ -130,7 +130,7 @@ func (tx *KVTX) PageDel(ptr uint64) {
 // Used by both PageNew (overflow) and the FreeList (via btree.FreeListStore).
 func (tx *KVTX) PageAppend(node btree.BNode) uint64 {
 	assert(len(node.Data) <= btree.PageSize)
-	ptr := tx.db.page.flushed + uint64(tx.page.nappend)
+	ptr := tx.kv.page.flushed + uint64(tx.page.nappend)
 	tx.page.nappend++
 	tx.page.updates[ptr] = node.Data
 	return ptr
@@ -164,7 +164,7 @@ func (tx *KVTX) Del(req *btree.DeleteReq) bool {
 // Begin opens a new write transaction.  The writer mutex is held until
 // Commit or Abort is called.
 func (kv *KV) Begin(tx *KVTX) {
-	tx.db = kv
+	tx.kv = kv
 	tx.page.updates = map[uint64][]byte{}
 	tx.mmap.chunks = kv.mmap.chunks
 
@@ -222,7 +222,6 @@ func (kv *KV) Commit(tx *KVTX) error {
 
 	// Phase 2: update the master page.
 	// NOTE: if this or the following fsync fails there is no safe rollback —
-	// see the original comment in the source for details.
 	if err := masterStore(kv); err != nil {
 		return err
 	}
@@ -251,10 +250,11 @@ func writePages(tx *KVTX) error {
 			freed = append(freed, ptr)
 		}
 	}
-	sort.Slice(freed, func(i, j int) bool { return freed[i] < freed[j] })
+	slices.Sort(freed)
+	// sort.Slice(freed, func(i, j int) bool { return freed[i] < freed[j] })
 	tx.free.Add(freed)
 
-	db := tx.db
+	db := tx.kv
 	npages := int(db.page.flushed) + tx.page.nappend
 	if err := extendFile(db, npages); err != nil {
 		return err

@@ -1,3 +1,8 @@
+// Package kv provides a transactional key-value store backed by a memory-mapped
+// file. It layers two responsibilities: a pager that manages the mmap region,
+// page allocation, and a free list for reclaiming deleted pages; and a
+// transaction engine that implements PageStore on top of the pager,
+// giving each transaction a consistent snapshot and copy-on-write isolation.
 package kv
 
 import (
@@ -41,39 +46,39 @@ type KV struct {
 }
 
 // Open opens or creates the database file at db.Path.
-func (db *KV) Open() error {
-	fp, err := os.OpenFile(db.Path, os.O_RDWR|os.O_CREATE, 0o644)
+func (kv *KV) Open() error {
+	fp, err := os.OpenFile(kv.Path, os.O_RDWR|os.O_CREATE, 0o644)
 	if err != nil {
 		return fmt.Errorf("OpenFile: %w", err)
 	}
-	db.fp = fp
+	kv.fp = fp
 
-	sz, chunk, err := mmapInit(db.fp)
+	sz, chunk, err := mmapInit(kv.fp)
 	if err != nil {
 		goto fail
 	}
-	db.mmap.file = sz
-	db.mmap.total = len(chunk)
-	db.mmap.chunks = [][]byte{chunk}
+	kv.mmap.file = sz
+	kv.mmap.total = len(chunk)
+	kv.mmap.chunks = [][]byte{chunk}
 
-	err = masterLoad(db)
+	err = masterLoad(kv)
 	if err != nil {
 		goto fail
 	}
 	return nil
 
 fail:
-	db.Close()
+	kv.Close()
 	return fmt.Errorf("KV.Open: %w", err)
 }
 
 // Close unmaps all pages and closes the file.
-func (db *KV) Close() {
-	for _, chunk := range db.mmap.chunks {
+func (kv *KV) Close() {
+	for _, chunk := range kv.mmap.chunks {
 		err := syscall.Munmap(chunk)
 		assert(err == nil)
 	}
-	_ = db.fp.Close()
+	_ = kv.fp.Close()
 }
 
 // --- mmap helpers ---
@@ -103,53 +108,49 @@ func mmapInit(fp *os.File) (int, []byte, error) {
 	return int(fi.Size()), chunk, nil
 }
 
-func extendFile(db *KV, npages int) error {
-	filePages := db.mmap.file / btree.PageSize
+func extendFile(kv *KV, npages int) error {
+	filePages := kv.mmap.file / btree.PageSize
 	if filePages >= npages {
 		return nil
 	}
 	for filePages < npages {
-		inc := filePages / 8
-		if inc < 1 {
-			inc = 1
-		}
+		inc := max(filePages/8, 1)
 		filePages += inc
 	}
 	fileSize := filePages * btree.PageSize
-	if err := syscall.Fallocate(int(db.fp.Fd()), 0, 0, int64(fileSize)); err != nil {
+	if err := syscall.Fallocate(int(kv.fp.Fd()), 0, 0, int64(fileSize)); err != nil {
 		return fmt.Errorf("fallocate: %w", err)
 	}
-	db.mmap.file = fileSize
+	kv.mmap.file = fileSize
 	return nil
 }
 
-func extendMmap(db *KV, npages int) error {
-	if db.mmap.total >= npages*btree.PageSize {
+func extendMmap(kv *KV, npages int) error {
+	if kv.mmap.total >= npages*btree.PageSize {
 		return nil
 	}
 	chunk, err := syscall.Mmap(
-		int(db.fp.Fd()), int64(db.mmap.total), db.mmap.total,
+		int(kv.fp.Fd()), int64(kv.mmap.total), kv.mmap.total,
 		syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED,
 	)
 	if err != nil {
 		return fmt.Errorf("mmap: %w", err)
 	}
-	db.mmap.total += db.mmap.total
-	db.mu.Lock()
-	db.mmap.chunks = append(db.mmap.chunks, chunk)
-	db.mu.Unlock()
+	kv.mmap.total += len(chunk)
+	kv.mu.Lock()
+	kv.mmap.chunks = append(kv.mmap.chunks, chunk)
+	kv.mu.Unlock()
 	return nil
 }
 
 // --- master page ---
-
-func masterLoad(db *KV) error {
-	if db.mmap.file == 0 {
-		db.page.flushed = 1 // page 0 is reserved for the master page
+func masterLoad(kv *KV) error {
+	if kv.mmap.file == 0 {
+		kv.page.flushed = 1
 		return nil
 	}
 
-	data := db.mmap.chunks[0]
+	data := kv.mmap.chunks[0]
 	root := binary.LittleEndian.Uint64(data[16:])
 	used := binary.LittleEndian.Uint64(data[24:])
 	free := binary.LittleEndian.Uint64(data[32:])
@@ -158,28 +159,28 @@ func masterLoad(db *KV) error {
 	if !bytes.Equal([]byte(dbSig), data[:len(dbSig)]) {
 		return errors.New("bad signature")
 	}
-	bad := !(1 <= used && used <= uint64(db.mmap.file/btree.PageSize))
+	bad := 1 > used || used > uint64(kv.mmap.file/btree.PageSize)
 	bad = bad || root >= used
 	bad = bad || free >= used
 	if bad {
 		return errors.New("bad master page")
 	}
 
-	db.tree.root = root
-	db.free.Head = free
-	db.page.flushed = used
-	db.version = version
+	kv.tree.root = root
+	kv.free.Head = free
+	kv.page.flushed = used
+	kv.version = version
 	return nil
 }
 
-func masterStore(db *KV) error {
+func masterStore(kv *KV) error {
 	var data [48]byte
 	copy(data[:16], []byte(dbSig))
-	binary.LittleEndian.PutUint64(data[16:], db.tree.root)
-	binary.LittleEndian.PutUint64(data[24:], db.page.flushed)
-	binary.LittleEndian.PutUint64(data[32:], db.free.Head)
-	binary.LittleEndian.PutUint64(data[40:], db.version)
-	_, err := db.fp.WriteAt(data[:], 0)
+	binary.LittleEndian.PutUint64(data[16:], kv.tree.root)
+	binary.LittleEndian.PutUint64(data[24:], kv.page.flushed)
+	binary.LittleEndian.PutUint64(data[32:], kv.free.Head)
+	binary.LittleEndian.PutUint64(data[40:], kv.version)
+	_, err := kv.fp.WriteAt(data[:], 0)
 	if err != nil {
 		return fmt.Errorf("write master page: %w", err)
 	}
@@ -191,11 +192,11 @@ func masterStore(db *KV) error {
 // readerList is a min-heap of active read transactions ordered by version.
 type readerList []*KVReader
 
-func (h readerList) Len() int            { return len(h) }
-func (h readerList) Less(i, j int) bool  { return h[i].version < h[j].version }
-func (h readerList) Swap(i, j int)       { h[i].index, h[j].index = j, i; h[i], h[j] = h[j], h[i] }
-func (h *readerList) Push(x interface{}) { r := x.(*KVReader); r.index = len(*h); *h = append(*h, r) }
-func (h *readerList) Pop() interface{}   { x := (*h)[len(*h)-1]; *h = (*h)[:len(*h)-1]; return x }
+func (h readerList) Len() int           { return len(h) }
+func (h readerList) Less(i, j int) bool { return h[i].version < h[j].version }
+func (h readerList) Swap(i, j int)      { h[i].index, h[j].index = j, i; h[i], h[j] = h[j], h[i] }
+func (h *readerList) Push(x any)        { r := x.(*KVReader); r.index = len(*h); *h = append(*h, r) }
+func (h *readerList) Pop() any          { x := (*h)[len(*h)-1]; *h = (*h)[:len(*h)-1]; return x }
 
 func assert(cond bool) {
 	if !cond {

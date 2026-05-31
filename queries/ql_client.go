@@ -1,3 +1,8 @@
+// Package queries implements a subset of SQL.
+// It covers two concerns: a parser that turns raw SQL-like strings into a
+// typed AST, and an executor that evaluates that AST against the tables layer.
+// Queries are exposed through a session abstraction that handles chunked input,
+// so callers can stream partial statements without managing parse state themselves.
 package queries
 
 import (

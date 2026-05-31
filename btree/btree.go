@@ -1,3 +1,9 @@
+// Package btree implements a copy-on-write B-tree over an abstract page store.
+// Nodes are fixed-size byte slices that map directly to on-disk pages, so no
+// serialisation step is needed. All mutations allocate new pages and never
+// modify existing ones, making the structure safe for MVCC transactions.
+// Storage I/O is fully delegated to a PageStore, keeping this package free of
+// any file or mmap concerns.
 package btree
 
 import "bytes"

@@ -9,24 +9,24 @@ import (
 
 func TestBTreeIter(t *testing.T) {
 	{
-		c := newC()
-		iter := c.tree.SeekLE(nil)
+		btt := newBTreeTester()
+		iter := btt.tree.SeekLE(nil)
 		is.False(t, iter.Valid())
 	}
 
 	for _, sz := range []int{5, 2500} {
-		c := newC()
-		for i := 0; i < sz; i++ {
-			c.add(fmt.Sprintf("key%010d", i), fmt.Sprintf("vvv%d", fmix32(uint32(-i))))
+		btt := newBTreeTester()
+		for i := range sz {
+			btt.add(fmt.Sprintf("key%010d", i), fmt.Sprintf("vvv%d", fmix32(uint32(-i))))
 		}
-		c.verify(t)
+		btt.verify(t)
 
 		prevk, prevv := []byte(nil), []byte(nil)
-		for i := 0; i < sz; i++ {
-			key := []byte(fmt.Sprintf("key%010d", i))
-			val := []byte(fmt.Sprintf("vvv%d", fmix32(uint32(-i))))
+		for i := range sz {
+			key := fmt.Appendf(nil, "key%010d", i)
+			val := fmt.Appendf(nil, "vvv%d", fmix32(uint32(-i)))
 
-			iter := c.tree.SeekLE(key)
+			iter := btt.tree.SeekLE(key)
 			is.True(t, iter.Valid())
 			gotk, gotv := iter.Deref()
 			is.Equal(t, key, gotk)

@@ -8,12 +8,12 @@ import (
 )
 
 func TestKVTX(t *testing.T) {
-	d := newD()
+	kvt := newKVTester()
 
-	d.add("k1", "v1")
+	kvt.add("k1", "v1")
 
 	tx := KVTX{}
-	d.db.Begin(&tx)
+	kvt.db.Begin(&tx)
 
 	tx.Update(&btree.InsertReq{Key: []byte("k1"), Val: []byte("xxx")})
 	tx.Update(&btree.InsertReq{Key: []byte("k2"), Val: []byte("xxx")})
@@ -25,45 +25,45 @@ func TestKVTX(t *testing.T) {
 	is.True(t, ok)
 	is.Equal(t, []byte("xxx"), val)
 
-	d.db.Abort(&tx)
-	d.verify(t)
+	kvt.db.Abort(&tx)
+	kvt.verify(t)
 
-	d.reopen()
-	d.verify(t)
+	kvt.reopen()
+	kvt.verify(t)
 
 	{
 		tx := KVTX{}
-		d.db.Begin(&tx)
+		kvt.db.Begin(&tx)
 		_, ok = tx.Get([]byte("k2"))
 		is.False(t, ok)
-		d.db.Abort(&tx)
+		kvt.db.Abort(&tx)
 	}
 
-	d.dispose()
+	kvt.dispose()
 }
 
 func TestKVRW(t *testing.T) {
-	d := newD()
+	kvt := newKVTester()
 
 	{
 		r0 := KVReader{}
-		d.db.BeginRead(&r0)
+		kvt.db.BeginRead(&r0)
 
-		d.add("k1", "v1")
+		kvt.add("k1", "v1")
 		{
 			r1 := KVReader{}
-			d.db.BeginRead(&r1)
+			kvt.db.BeginRead(&r1)
 
-			d.add("k2", "v2")
+			kvt.add("k2", "v2")
 			_, ok := r1.Get([]byte("k2"))
 			assert(!ok)
 			val, ok := r1.Get([]byte("k1"))
 			assert(ok && string(val) == "v1")
 
-			d.db.EndRead(&r1)
+			kvt.db.EndRead(&r1)
 		}
 
-		d.add("k3", "v3")
+		kvt.add("k3", "v3")
 
 		_, ok := r0.Get([]byte("k1"))
 		assert(!ok)
@@ -72,22 +72,22 @@ func TestKVRW(t *testing.T) {
 		_, ok = r0.Get([]byte("k3"))
 		assert(!ok)
 
-		d.db.EndRead(&r0)
+		kvt.db.EndRead(&r0)
 	}
 
 	{
 		r3 := KVReader{}
-		d.db.BeginRead(&r3)
+		kvt.db.BeginRead(&r3)
 		val, ok := r3.Get([]byte("k1"))
 		assert(ok && string(val) == "v1")
 		val, ok = r3.Get([]byte("k2"))
 		assert(ok && string(val) == "v2")
 		val, ok = r3.Get([]byte("k3"))
 		assert(ok && string(val) == "v3")
-		d.db.EndRead(&r3)
+		kvt.db.EndRead(&r3)
 	}
 
-	assert(d.db.version == 3)
+	assert(kvt.db.version == 3)
 
-	d.dispose()
+	kvt.dispose()
 }

@@ -11,42 +11,41 @@ import (
 	is "github.com/stretchr/testify/require"
 )
 
-type R struct {
+type tableTester struct {
 	db  DB
 	ref map[string][]Record
 }
 
-func newR() *R {
+func newTableTester() *tableTester {
 	os.Remove("r.db")
-	r := &R{
+	tt := &tableTester{
 		db:  DB{Path: "r.db"},
 		ref: map[string][]Record{},
 	}
-	err := r.db.Open()
+	err := tt.db.Open()
 	assert(err == nil)
-	return r
+	return tt
 }
 
-func (r *R) dispose() {
-	r.db.Close()
+func (tt *tableTester) dispose() {
+	tt.db.Close()
 	os.Remove("r.db")
 }
 
-func (r *R) create(tdef *TableDef) {
+func (tt *tableTester) create(tdef *TableDef) {
 	tx := DBTX{}
-	r.db.Begin(&tx)
+	tt.db.Begin(&tx)
 	err := tx.TableNew(tdef)
 	assert(err == nil)
-	err = r.db.Commit(&tx)
+	err = tt.db.Commit(&tx)
 	assert(err == nil)
 }
 
-func (r *R) findRef(tx *DBTX, table string, rec Record) int {
-	// Use the transaction passed from the caller instead of opening a new one
+func (tt *tableTester) findRef(tx *DBTX, table string, rec Record) int {
 	tdef := tx.TableDef(table)
 
 	pkeys := tdef.PKeys
-	records := r.ref[table]
+	records := tt.ref[table]
 	found := -1
 	for i, old := range records {
 		if reflect.DeepEqual(old.Vals[:pkeys], rec.Vals[:pkeys]) {
@@ -57,75 +56,75 @@ func (r *R) findRef(tx *DBTX, table string, rec Record) int {
 	return found
 }
 
-func (r *R) add(table string, rec Record) bool {
+func (tt *tableTester) add(table string, rec Record) bool {
 	tx := DBTX{}
-	r.db.Begin(&tx)
+	tt.db.Begin(&tx)
 	added, err := tx.Upsert(table, rec)
 	assert(err == nil)
 
-	records := r.ref[table]
-	idx := r.findRef(&tx, table, rec)
+	records := tt.ref[table]
+	idx := tt.findRef(&tx, table, rec)
 	if !added {
 		assert(idx >= 0)
 		records[idx] = rec
 	} else {
 		assert(idx == -1)
-		r.ref[table] = append(records, rec)
+		tt.ref[table] = append(records, rec)
 	}
 
-	err = r.db.Commit(&tx)
+	err = tt.db.Commit(&tx)
 	assert(err == nil)
 	return added
 }
 
-func (r *R) del(table string, rec Record) bool {
+func (tt *tableTester) del(table string, rec Record) bool {
 	tx := DBTX{}
-	r.db.Begin(&tx)
+	tt.db.Begin(&tx)
 	deleted, err := tx.Delete(table, rec)
 	assert(err == nil)
 
-	idx := r.findRef(&tx, table, rec)
+	idx := tt.findRef(&tx, table, rec)
 	if deleted {
 		assert(idx >= 0)
-		records := r.ref[table]
+		records := tt.ref[table]
 		copy(records[idx:], records[idx+1:])
-		r.ref[table] = records[:len(records)-1]
+		tt.ref[table] = records[:len(records)-1]
 	} else {
 		assert(idx == -1)
 	}
 
-	err = r.db.Commit(&tx)
+	err = tt.db.Commit(&tx)
 	assert(err == nil)
 	return deleted
 }
 
-func (r *R) get(table string, rec *Record) bool {
+func (tt *tableTester) get(table string, rec *Record) bool {
 	tx := DBTX{}
-	r.db.Begin(&tx)
+	tt.db.Begin(&tx)
 	ok, err := tx.Get(table, rec)
 	assert(err == nil)
 
-	idx := r.findRef(&tx, table, *rec)
+	idx := tt.findRef(&tx, table, *rec)
 	if ok {
 		assert(idx >= 0)
-		records := r.ref[table]
+		records := tt.ref[table]
 		assert(reflect.DeepEqual(records[idx], *rec))
 	} else {
 		assert(idx < 0)
 	}
-	r.db.Abort(&tx)
+	tt.db.Abort(&tx)
 	return ok
 }
 
 func TestTableCreate(t *testing.T) {
-	r := newR()
+	tt := newTableTester()
 	tdef := &TableDef{
 		Name:  "tbl_test",
 		Cols:  []string{"ki1", "ks2", "s1", "i2"},
 		Types: []uint32{TypeInt64, TypeBytes, TypeBytes, TypeInt64},
 		PKeys: 2,
 	}
-	r.create(tdef)
+	tt.create(tdef)
 
 	tdef = &TableDef{
 		Name:  "tbl_test2",
@@ -133,10 +132,10 @@ func TestTableCreate(t *testing.T) {
 		Types: []uint32{TypeInt64, TypeBytes},
 		PKeys: 2,
 	}
-	r.create(tdef)
+	tt.create(tdef)
 
 	tx := DBTX{}
-	r.db.Begin(&tx)
+	tt.db.Begin(&tx)
 	{
 		rec := (&Record{}).AddStr("key", []byte("next_prefix"))
 		ok, err := tx.Get("@meta", rec)
@@ -151,62 +150,62 @@ func TestTableCreate(t *testing.T) {
 			`"PKeys":2,"Indexes":[],"Prefix":100,"IndexPrefixes":[]}`)
 		is.Equal(t, expected, string(rec.Get("def").Str))
 	}
-	r.db.Abort(&tx)
-	r.dispose()
+	tt.db.Abort(&tx)
+	tt.dispose()
 }
 
 func TestTableBasic(t *testing.T) {
-	r := newR()
+	tt := newTableTester()
 	tdef := &TableDef{
 		Name:  "tbl_test",
 		Cols:  []string{"ki1", "ks2", "s1", "i2"},
 		Types: []uint32{TypeInt64, TypeBytes, TypeBytes, TypeInt64},
 		PKeys: 2,
 	}
-	r.create(tdef)
+	tt.create(tdef)
 
 	rec := Record{}
 	rec.AddInt64("ki1", 1).AddStr("ks2", []byte("hello"))
 	rec.AddStr("s1", []byte("world")).AddInt64("i2", 2)
-	added := r.add("tbl_test", rec)
+	added := tt.add("tbl_test", rec)
 	is.True(t, added)
 
 	{
 		got := Record{}
 		got.AddInt64("ki1", 1).AddStr("ks2", []byte("hello"))
-		ok := r.get("tbl_test", &got)
+		ok := tt.get("tbl_test", &got)
 		is.True(t, ok)
 	}
 	{
 		got := Record{}
 		got.AddInt64("ki1", 1).AddStr("ks2", []byte("hello2"))
-		ok := r.get("tbl_test", &got)
+		ok := tt.get("tbl_test", &got)
 		is.False(t, ok)
 	}
 
 	rec.Get("s1").Str = []byte("www")
-	added = r.add("tbl_test", rec)
+	added = tt.add("tbl_test", rec)
 	is.False(t, added)
 
 	{
 		got := Record{}
 		got.AddInt64("ki1", 1).AddStr("ks2", []byte("hello"))
-		ok := r.get("tbl_test", &got)
+		ok := tt.get("tbl_test", &got)
 		is.True(t, ok)
 	}
 
 	{
 		key := Record{}
 		key.AddInt64("ki1", 1).AddStr("ks2", []byte("hello2"))
-		deleted := r.del("tbl_test", key)
+		deleted := tt.del("tbl_test", key)
 		is.False(t, deleted)
 
 		key.Get("ks2").Str = []byte("hello")
-		deleted = r.del("tbl_test", key)
+		deleted = tt.del("tbl_test", key)
 		is.True(t, deleted)
 	}
 
-	r.dispose()
+	tt.dispose()
 }
 
 func TestStringEscape(t *testing.T) {
@@ -249,7 +248,7 @@ func TestTableEncoding(t *testing.T) {
 }
 
 func TestTableScan(t *testing.T) {
-	r := newR()
+	tt := newTableTester()
 	tdef := &TableDef{
 		Name:  "tbl_test",
 		Cols:  []string{"ki1", "ks2", "s1", "i2"},
@@ -261,19 +260,19 @@ func TestTableScan(t *testing.T) {
 			{"ki1", "i2"},
 		},
 	}
-	r.create(tdef)
+	tt.create(tdef)
 
 	size := 100
 	for i := 0; i < size; i += 2 {
 		rec := Record{}
 		rec.AddInt64("ki1", int64(i)).AddStr("ks2", []byte("hello"))
 		rec.AddStr("s1", []byte("world")).AddInt64("i2", int64(i/2))
-		added := r.add("tbl_test", rec)
+		added := tt.add("tbl_test", rec)
 		assert(added)
 	}
 
 	tx := DBTX{}
-	r.db.Begin(&tx)
+	tt.db.Begin(&tx)
 
 	{
 		rec := Record{}
@@ -291,7 +290,7 @@ func TestTableScan(t *testing.T) {
 			got = append(got, rec)
 			req.Next()
 		}
-		is.Equal(t, r.ref["tbl_test"], got)
+		is.Equal(t, tt.ref["tbl_test"], got)
 	}
 
 	tmpkey := func(n int) Record {
@@ -346,12 +345,12 @@ func TestTableScan(t *testing.T) {
 		}
 	}
 
-	r.db.Abort(&tx)
-	r.dispose()
+	tt.db.Abort(&tx)
+	tt.dispose()
 }
 
 func TestTableIndex(t *testing.T) {
-	r := newR()
+	tt := newTableTester()
 	tdef := &TableDef{
 		Name:  "tbl_test",
 		Cols:  []string{"ki1", "ks2", "s1", "i2"},
@@ -363,7 +362,7 @@ func TestTableIndex(t *testing.T) {
 			{"ki1", "i2"},
 		},
 	}
-	r.create(tdef)
+	tt.create(tdef)
 
 	record := func(ki1 int64, ks2 string, s1 string, i2 int64) Record {
 		rec := Record{}
@@ -374,12 +373,12 @@ func TestTableIndex(t *testing.T) {
 
 	r1 := record(1, "a1", "v1", 2)
 	r2 := record(2, "a2", "v2", -2)
-	r.add("tbl_test", r1)
-	r.add("tbl_test", r2)
+	tt.add("tbl_test", r1)
+	tt.add("tbl_test", r2)
 
 	{
 		tx := DBTX{}
-		r.db.Begin(&tx)
+		tt.db.Begin(&tx)
 		rec := Record{}
 		rec.AddInt64("i2", 2)
 		req := Scanner{Cmp1: btree.CmpGE, Cmp2: btree.CmpLE, Key1: rec, Key2: rec}
@@ -391,12 +390,12 @@ func TestTableIndex(t *testing.T) {
 		is.Equal(t, r1, out)
 		req.Next()
 		is.False(t, req.Valid())
-		r.db.Abort(&tx)
+		tt.db.Abort(&tx)
 	}
 
 	{
 		tx := DBTX{}
-		r.db.Begin(&tx)
+		tt.db.Begin(&tx)
 		rec1 := Record{}
 		rec1.AddInt64("i2", 2)
 		rec2 := Record{}
@@ -405,52 +404,52 @@ func TestTableIndex(t *testing.T) {
 		err := tx.Scan("tbl_test", &req)
 		assert(err == nil)
 		is.False(t, req.Valid())
-		r.db.Abort(&tx)
+		tt.db.Abort(&tx)
 	}
 
 	{
-		r.add("tbl_test", record(1, "a1", "v1", 1))
+		tt.add("tbl_test", record(1, "a1", "v1", 1))
 		tx := DBTX{}
-		r.db.Begin(&tx)
+		tt.db.Begin(&tx)
 		rec := Record{}
 		rec.AddInt64("i2", 2)
 		req := Scanner{Cmp1: btree.CmpGE, Cmp2: btree.CmpLE, Key1: rec, Key2: rec}
 		err := tx.Scan("tbl_test", &req)
 		assert(err == nil)
 		is.False(t, req.Valid())
-		r.db.Abort(&tx)
+		tt.db.Abort(&tx)
 	}
 
 	{
 		tx := DBTX{}
-		r.db.Begin(&tx)
+		tt.db.Begin(&tx)
 		rec := Record{}
 		rec.AddInt64("i2", 1)
 		req := Scanner{Cmp1: btree.CmpGE, Cmp2: btree.CmpLE, Key1: rec, Key2: rec}
 		err := tx.Scan("tbl_test", &req)
 		assert(err == nil)
 		is.True(t, req.Valid())
-		r.db.Abort(&tx)
+		tt.db.Abort(&tx)
 	}
 
 	{
 		rec := Record{}
 		rec.AddInt64("ki1", 1).AddStr("ks2", []byte("a1"))
-		ok := r.del("tbl_test", rec)
+		ok := tt.del("tbl_test", rec)
 		assert(ok)
 	}
 
 	{
 		tx := DBTX{}
-		r.db.Begin(&tx)
+		tt.db.Begin(&tx)
 		rec := Record{}
 		rec.AddInt64("i2", 1)
 		req := Scanner{Cmp1: btree.CmpGE, Cmp2: btree.CmpLE, Key1: rec, Key2: rec}
 		err := tx.Scan("tbl_test", &req)
 		assert(err == nil)
 		is.False(t, req.Valid())
-		r.db.Abort(&tx)
+		tt.db.Abort(&tx)
 	}
 
-	r.dispose()
+	tt.dispose()
 }

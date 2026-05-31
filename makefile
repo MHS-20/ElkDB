@@ -4,7 +4,7 @@ DBGFLAGS= -gcflags="all=-N -l"
 LDFLAGS =
 
 TARGET  = elk
-PKG     = ./src/...
+PKG     = ./...
 MAIN    = .
 
 .PHONY: all

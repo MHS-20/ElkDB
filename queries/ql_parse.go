@@ -27,12 +27,13 @@ func (l *lexer) skipWS() {
 	}
 }
 
-func (l *lexer) peek() byte {
-	if l.pos >= len(l.input) {
-		return 0
-	}
-	return l.input[l.pos]
-}
+//
+// func (l *lexer) peek() byte {
+// 	if l.pos >= len(l.input) {
+// 		return 0
+// 	}
+// 	return l.input[l.pos]
+// }
 
 func (l *lexer) next() Token {
 	l.skipWS()

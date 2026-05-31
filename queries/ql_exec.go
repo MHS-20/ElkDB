@@ -107,7 +107,7 @@ func qlInsert(tx table.Writer, stmt Statement) (Result, error) {
 // ---------------------------------------------------------------------------
 
 // qlExpandStar replaces ["*"] with the full column list from tdef.
-func qlExpandStar(tx table.Reader, tdef *table.TableDef, cols []string) []string {
+func qlExpandStar(_ table.Reader, tdef *table.TableDef, cols []string) []string {
 	if len(cols) == 1 && cols[0] == "*" {
 		return tdef.Cols
 	}
