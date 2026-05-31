@@ -1,0 +1,25 @@
+┌──────────┬──────────┬────────────┬──────────────────┐
+│ MsgType  │ ReqID    │ PayloadLen │ Payload          │
+│ 1 byte   │ 4 bytes  │ 4 bytes    │ PayloadLen bytes │
+└──────────┴──────────┴────────────┴──────────────────┘
+
+// Client → Server
+0x01  QueryMsg      payload: uint8 flags + string query
+0x02  PingMsg       payload: empty
+
+// Server → Client  
+0x81  ResultMsg     payload: encoded Result
+0x82  ErrorMsg      payload: string error message
+0x83  PongMsg       payload: empty
+
+ResultMsg payload:
+  uint32   affected_rows
+  uint32   row_count
+  for each row:
+    uint16   col_count
+    for each col:
+      uint8    name_len
+      []byte   name
+      uint8    type   (0x01=int64, 0x02=bytes)
+      if int64:  int64 (big-endian)
+      if bytes:  uint32 len + []byte data
