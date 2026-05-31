@@ -23,58 +23,15 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Test Helper: StmtSplitter
-// ---------------------------------------------------------------------------
-
-type StmtSplitter struct {
-	buffer string
-}
-
-func (s *StmtSplitter) Feed(chunk string) {
-	s.buffer += chunk
-}
-
-func (s *StmtSplitter) Pop() (string, bool) {
-	var inString bool
-
-	for i := 0; i < len(s.buffer); i++ {
-		ch := s.buffer[i]
-
-		if ch == '\'' {
-			inString = !inString
-			continue
-		}
-
-		if ch == ';' && !inString {
-			stmt := s.buffer[:i+1]
-			s.buffer = s.buffer[i+1:]
-			return stmt, true
-		}
-	}
-
-	return "", false
-}
-
-// ---------------------------------------------------------------------------
 // Session — the "client connection"
 // ---------------------------------------------------------------------------
-
-type Session struct {
-	db       table.DB
-	splitter StmtSplitter
-}
 
 func newSession(t *testing.T, path string) *Session {
 	t.Helper()
 	os.Remove(path)
-	s := &Session{}
-	s.db.Path = path
-	err := s.db.Open()
+	s, err := NewSession(path)
 	is.NoError(t, err)
-	t.Cleanup(func() {
-		s.db.Close()
-		os.Remove(path)
-	})
+	t.Cleanup(func() { s.Close(); os.Remove(path) })
 	return s
 }
 
@@ -106,7 +63,7 @@ func (s *Session) drainSplitter(t *testing.T) []Result {
 		stmt := strings.TrimSuffix(strings.TrimSpace(rawStmt), ";")
 
 		tx := table.DBTX{}
-		s.db.Begin(&tx)
+		s.DB.Begin(&tx)
 
 		var result Result
 		var err error
@@ -117,10 +74,10 @@ func (s *Session) drainSplitter(t *testing.T) []Result {
 		}
 
 		if err != nil {
-			s.db.Abort(&tx)
+			s.DB.Abort(&tx)
 			t.Fatalf("SQL error: %v\nstatement: %q", err, stmt)
 		}
-		err = s.db.Commit(&tx)
+		err = s.DB.Commit(&tx)
 		is.NoError(t, err)
 		results = append(results, result)
 	}
@@ -138,16 +95,16 @@ func (s *Session) SendChunkErr(t *testing.T, chunk string) error {
 	stmt := strings.TrimSuffix(strings.TrimSpace(rawStmt), ";")
 
 	tx := table.DBTX{}
-	s.db.Begin(&tx)
-	
+	s.DB.Begin(&tx)
+
 	var err error
 	if strings.HasPrefix(strings.ToUpper(stmt), "SELECT") {
 		_, err = ReaderExecString(&tx, stmt)
 	} else {
 		_, err = WriterExecString(&tx, stmt)
 	}
-	
-	s.db.Abort(&tx)
+
+	s.DB.Abort(&tx)
 	return err
 }
 
@@ -217,9 +174,9 @@ func TestSession_StatementSplitAcrossChunks(t *testing.T) {
 	is.Equal(t, 1, r2[0].Affected)
 
 	tx := table.DBTX{}
-	s.db.Begin(&tx)
+	s.DB.Begin(&tx)
 	result, err := ReaderExecString(&tx, "SELECT * FROM t WHERE id == 1;")
-	s.db.Abort(&tx)
+	s.DB.Abort(&tx)
 	is.NoError(t, err)
 	is.Len(t, result.Rows, 1)
 	is.Equal(t, []byte("hello"), result.Rows[0].Get("val").Str)
@@ -238,9 +195,9 @@ func TestSession_SemicolonInStringLiteral(t *testing.T) {
 	is.Equal(t, 1, r2[0].Affected)
 
 	tx := table.DBTX{}
-	s.db.Begin(&tx)
+	s.DB.Begin(&tx)
 	res, err := ReaderExecString(&tx, "SELECT * FROM t WHERE id >= 1;")
-	s.db.Abort(&tx)
+	s.DB.Abort(&tx)
 	is.NoError(t, err)
 	is.Len(t, res.Rows, 2)
 	is.Equal(t, []byte("hello; world"), res.Rows[0].Get("msg").Str)
@@ -257,9 +214,9 @@ func TestSession_EscapedQuoteInString(t *testing.T) {
 	is.Equal(t, 1, results[0].Affected)
 
 	tx := table.DBTX{}
-	s.db.Begin(&tx)
+	s.DB.Begin(&tx)
 	res, err := ReaderExecString(&tx, "SELECT * FROM t WHERE id == 1;")
-	s.db.Abort(&tx)
+	s.DB.Abort(&tx)
 	is.NoError(t, err)
 	is.Equal(t, []byte("its fine"), res.Rows[0].Get("msg").Str)
 }
@@ -283,9 +240,9 @@ func TestSession_CRUDWorkflow(t *testing.T) {
 
 	{
 		tx := table.DBTX{}
-		s.db.Begin(&tx)
+		s.DB.Begin(&tx)
 		res, err := ReaderExecString(&tx, "SELECT * FROM employees WHERE id >= 1;")
-		s.db.Abort(&tx)
+		s.DB.Abort(&tx)
 		is.NoError(t, err)
 		is.Len(t, res.Rows, 3)
 	}
@@ -294,9 +251,9 @@ func TestSession_CRUDWorkflow(t *testing.T) {
 
 	{
 		tx := table.DBTX{}
-		s.db.Begin(&tx)
+		s.DB.Begin(&tx)
 		res, err := ReaderExecString(&tx, "SELECT * FROM employees WHERE id == 1;")
-		s.db.Abort(&tx)
+		s.DB.Abort(&tx)
 		is.NoError(t, err)
 		is.Equal(t, int64(95000), res.Rows[0].Get("salary").I64)
 	}
@@ -305,9 +262,9 @@ func TestSession_CRUDWorkflow(t *testing.T) {
 
 	{
 		tx := table.DBTX{}
-		s.db.Begin(&tx)
+		s.DB.Begin(&tx)
 		res, err := ReaderExecString(&tx, "SELECT * FROM employees WHERE id >= 1;")
-		s.db.Abort(&tx)
+		s.DB.Abort(&tx)
 		is.NoError(t, err)
 		is.Len(t, res.Rows, 2)
 	}
@@ -379,9 +336,9 @@ func TestSession_UpsertThroughSession(t *testing.T) {
 	is.Equal(t, 0, r2[0].Affected)
 
 	tx := table.DBTX{}
-	s.db.Begin(&tx)
+	s.DB.Begin(&tx)
 	res, _ := ReaderExecString(&tx, "SELECT * FROM t WHERE id == 1;")
-	s.db.Abort(&tx)
+	s.DB.Abort(&tx)
 	is.Len(t, res.Rows, 1)
 	is.Equal(t, []byte("second"), res.Rows[0].Get("v").Str)
 }
@@ -410,9 +367,9 @@ func TestSession_LargeBatch(t *testing.T) {
 	}
 
 	tx := table.DBTX{}
-	s.db.Begin(&tx)
+	s.DB.Begin(&tx)
 	res, err := ReaderExecString(&tx, "SELECT * FROM t WHERE id >= 0;")
-	s.db.Abort(&tx)
+	s.DB.Abort(&tx)
 	is.NoError(t, err)
 	is.Len(t, res.Rows, total)
 }
@@ -438,3 +395,4 @@ func itoa(n int) string {
 	}
 	return string(buf[pos:])
 }
+
