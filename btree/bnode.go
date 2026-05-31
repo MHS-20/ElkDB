@@ -146,7 +146,7 @@ func nodeAppendRange(new BNode, old BNode, dstNew uint16, srcOld uint16, n uint1
 		return
 	}
 
-	for i := uint16(0); i < n; i++ {
+	for i := range n {
 		new.setPtr(dstNew+i, old.getPtr(srcOld+i))
 	}
 

@@ -76,6 +76,7 @@ func indexOp(tx *DBTX, tdef *TableDef, rec Record, op int) {
 			irec[j] = *rec.Get(c)
 		}
 		key = encodeKey(key[:0], tdef.IndexPrefixes[i], irec[:len(index)])
+		assert(len(key) <= btree.MaxKeySize)
 		var done bool
 		switch op {
 		case indexAdd:
@@ -90,7 +91,6 @@ func indexOp(tx *DBTX, tdef *TableDef, rec Record, op int) {
 }
 
 // dbUpdate writes one row to tdef, maintaining secondary indexes.
-// FIXME: check key length before writing.
 func dbUpdate(tx *DBTX, tdef *TableDef, dbreq *DBSetReq) error {
 	values, err := checkRecord(tdef, dbreq.Record, len(tdef.Cols))
 	if err != nil {
@@ -99,9 +99,16 @@ func dbUpdate(tx *DBTX, tdef *TableDef, dbreq *DBSetReq) error {
 
 	key := encodeKey(nil, tdef.Prefix, values[:tdef.PKeys])
 	val := encodeValues(nil, values[tdef.PKeys:])
+
+	if len(key) > btree.MaxKeySize {
+		return fmt.Errorf("primary key too large: %d bytes (max %d)", len(key), btree.MaxKeySize)
+	}
+	if len(val) > btree.MaxValSize {
+		return fmt.Errorf("value too large: %d bytes (max %d)", len(val), btree.MaxValSize)
+	}
+
 	req := btree.InsertReq{Key: key, Val: val, Mode: dbreq.Mode}
 	tx.kvw.Update(&req)
-
 	dbreq.Added, dbreq.Updated = req.Added, req.Updated
 	if !req.Updated || len(tdef.Indexes) == 0 {
 		return nil
@@ -120,7 +127,6 @@ func dbUpdate(tx *DBTX, tdef *TableDef, dbreq *DBSetReq) error {
 }
 
 // dbDelete removes one row from tdef, maintaining secondary indexes.
-// FIXME: check key length before writing.
 func dbDelete(tx *DBTX, tdef *TableDef, rec Record) (bool, error) {
 	values, err := checkRecord(tdef, rec, tdef.PKeys)
 	if err != nil {
@@ -128,6 +134,10 @@ func dbDelete(tx *DBTX, tdef *TableDef, rec Record) (bool, error) {
 	}
 
 	key := encodeKey(nil, tdef.Prefix, values[:tdef.PKeys])
+	if len(key) > btree.MaxKeySize {
+		return false, fmt.Errorf("primary key too large: %d bytes (max %d)", len(key), btree.MaxKeySize)
+	}
+
 	req := btree.DeleteReq{Key: key}
 	deleted := tx.kvw.Del(&req)
 	if !deleted || len(tdef.Indexes) == 0 {

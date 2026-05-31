@@ -224,10 +224,7 @@ func flPush(fl *FreeList, freed []uint64, version []uint64, reuse []uint64) {
 	for len(freed) > 0 {
 		node := BNode{make([]byte, PageSize)}
 
-		size := len(freed)
-		if size > FreeListCap {
-			size = FreeListCap
-		}
+		size := min(len(freed), FreeListCap)
 		flnSetHeader(node, uint16(size), fl.Head)
 		for i, ptr := range freed[:size] {
 			ver := fl.version + 1

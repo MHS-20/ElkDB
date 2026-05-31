@@ -88,10 +88,18 @@ func (sc *Scanner) Deref(rec *Record) {
 		for _, c := range rec.Cols {
 			rec.Vals = append(rec.Vals, *icol.Get(c))
 		}
-		// Fetch the complete row by primary key.
-		// TODO: skip the round-trip when the index covers all columns.
-		ok, err := dbGet(sc.tx, tdef, rec)
-		assert(ok && err == nil)
+		// Fetch the complete row by primary key
+		if len(index) == len(tdef.Cols) {
+			rec.Cols = tdef.Cols
+			fullVals := make([]Value, len(tdef.Cols))
+			for i, c := range tdef.Cols {
+				fullVals[i] = *icol.Get(c)
+			}
+			rec.Vals = fullVals
+		} else {
+			ok, err := dbGet(sc.tx, tdef, rec)
+			assert(ok && err == nil)
+		}
 	}
 }
 
