@@ -106,20 +106,22 @@ func (node BNode) nbytes() uint16 {
 // --- lookup ---
 
 // nodeLookupLE returns the last index i where node.getKey(i) <= key.
-// TODO: replace with binary search.
 func nodeLookupLE(node BNode, key []byte) uint16 {
 	nkeys := node.nkeys()
-	found := uint16(0)
-	for i := uint16(1); i < nkeys; i++ {
-		cmp := bytes.Compare(node.getKey(i), key)
+	lo, hi := uint16(1), nkeys-1
+	for lo < hi {
+		mid := lo + (hi-lo+1)/2
+		cmp := bytes.Compare(node.getKey(mid), key)
 		if cmp <= 0 {
-			found = i
-		}
-		if cmp >= 0 {
-			break
+			lo = mid
+		} else {
+			hi = mid - 1
 		}
 	}
-	return found
+	if lo < nkeys && bytes.Compare(node.getKey(lo), key) <= 0 {
+		return lo
+	}
+	return 0
 }
 
 // --- mutation helpers ---
