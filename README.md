@@ -1,6 +1,11 @@
 # ElkDB
 
-ElkDB is a relational database built from scratch. It is designed as a learning and reference implementation: every layer — from raw page storage up to SQL parsing and a TCP network protocol — is written without external dependencies. The codebase is intentionally small and readable, with each package having a single, well-defined responsibility.
+ElkDB is a relational database built from scratch. It is designed as a learning and reference implementation: every layer — from raw page storage up to SQL parsing and a TCP network protocol — is written without external dependencies. 
+
+<div align="center">
+<img src="elk.png" alt="Logo" width="300"/>
+</div>
+
 
 ---
 
