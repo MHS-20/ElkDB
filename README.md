@@ -1,23 +1,24 @@
 # ElkDB
 
-ElkDB is a relational database built from scratch. It is designed as a learning and reference implementation: every layer — from raw page storage up to SQL parsing and a TCP network protocol — is written without external dependencies. 
+ElkDB is a relational database built from scratch. It is designed as a learning and reference implementation: every layer — from raw page storage up to SQL parsing and a TCP network protocol — is written without external dependencies.
 
 <div align="center">
 <img src="elk.png" alt="Logo" width="300"/>
 </div>
-
 
 ---
 
 ## Features
 
 - Copy-on-write B-tree with MVCC snapshot isolation
-- Durable, crash-safe page storage over a memory-mapped file
+- Write-ahead log (WAL) for crash-safe durability with fast recovery
+- Multiple concurrent writers with optimistic concurrency control (OCC) and transparent retry
 - Versioned free page list with safe concurrent-reader reclamation
-- Read-write and read-only transactions with serialisable writes
+- Read-write and read-only transactions with serialisable isolation
 - Relational table layer with primary keys, secondary indexes, and schema persistence
-- SQL-like query language supporting CREATE TABLE, INSERT, UPSERT, UPDATE, DELETE, and SELECT with WHERE
-- Binary network protocol (ElkWire) for client-server communication
+- SQL-like query language supporting CREATE TABLE, INSERT, UPSERT, UPDATE, DELETE, SELECT with WHERE, and **INNER JOIN / LEFT JOIN**
+- Binary network protocol (ElkWire) with **connection multiplexing** (multiple in-flight requests per connection)
+- **Async API** (`ExecAsync` / `PingAsync`) returning channels for non-blocking client applications
 - Go SDK for embedding database access in any application
 - Interactive REPL supporting both local (embedded) and remote (server) modes
 
@@ -28,9 +29,9 @@ ElkDB is a relational database built from scratch. It is designed as a learning 
 The codebase is organised as a strict dependency stack. Each layer knows only about the layer directly below it; nothing reaches upward.
 
 ```
-queries/      SQL parser and executor
+queries/      SQL parser and executor (including JOIN)
 tables/       relational schema, encoding, index management
-kv/           transactional key-value store, pager, mmap
+kv/           transactional key-value store, WAL, pager, mmap
 btree/        copy-on-write B-tree, free list
 network/      ElkWire protocol, server, client SDK
 cmd/          binary entry points
@@ -68,17 +69,33 @@ The first page of the file is reserved as the master page. It contains a fixed-s
 
 File growth is managed with `fallocate`, which pre-allocates disk space in geometric increments to amortise the cost of growth. The mmap is extended separately from the file to maintain the invariant that the mapped region is always at least as large as the live portion of the file.
 
+### Write-Ahead Log (`kv/wal.go`)
+
+ElkDB uses a sequential write-ahead log (WAL) for crash durability. On every commit, page data is written as WAL records (BeginTX, PageData, CommitTX) and the WAL is fsynced. The main database file is NOT touched during a normal commit — only the in-memory state is updated.
+
+On clean shutdown (`KV.Close()`), a checkpoint flushes all WAL pages into the mmap, writes the master page, and truncates the WAL. On crash recovery (detected when the WAL is non-empty on open), the WAL is scanned and committed transactions are replayed to restore the database to a consistent state.
+
+The WAL file format uses a 16-byte header (`ElkWAL` signature, version, CRC) followed by variable-length records. Each record has a type byte, CRC, length, and payload. Record types are BeginTX (1), PageData (2), PageFree (3), and CommitTX (4). Periodic checkpoints keep the WAL bounded.
+
 ### Transactions (`kv/`)
 
 ElkDB supports two transaction kinds: read-only snapshots (`KVReader`) and read-write transactions (`KVTX`).
 
-A read-only transaction captures the current B-tree root and the current mmap chunk list at the moment it is opened. All subsequent reads within the transaction see exactly this snapshot, regardless of concurrent writes. The transaction is registered in the reader heap so the free list knows it is active.
+A **read-only transaction** captures the current B-tree root and the current mmap chunk list at the moment it is opened. All subsequent reads within the transaction see exactly this snapshot, regardless of concurrent writes. The transaction is registered in the reader heap so the free list knows it is active.
 
-A read-write transaction acquires a mutex on open, ensuring there is at most one writer at any time. It operates on an in-memory update map: new and modified pages are buffered in a `map[uint64][]byte` and are not written to the mmap until commit. Reads within the transaction check this buffer first and fall back to the mmap for pages that have not been modified. Freed pages are recorded with a `nil` entry and handed to the free list at commit time.
+A **read-write transaction** operates on an in-memory update map: new and modified pages are buffered in a `map[uint64][]byte` and are not written to the mmap until commit. Reads within the transaction check this buffer first and fall back to the mmap for pages that have not been modified. Freed pages are recorded with a `nil` entry and handed to the free list at commit time.
 
-Commit proceeds in two phases. First, all modified pages are written into the mmap (which has been extended if necessary) and an `fsync` is issued to ensure the page data reaches disk. Second, the master page is rewritten atomically and a second `fsync` is issued. If the process crashes between the two fsyncs, the master page still points to the previous consistent state and the database is intact. If it crashes after the second fsync, the new state is durable. There is no write-ahead log; durability is achieved entirely through the two-phase master-page update.
+Multiple read-write transactions may exist concurrently (the old single-writer mutex was removed in Phase 2). On commit, the transaction:
 
-Aborting a transaction simply discards the in-memory update map and releases the writer mutex. Because nothing was written to disk, abort is instantaneous and infallible.
+1. Acquires a short-lived **commit mutex** (`commitMu`).
+2. Performs **optimistic concurrency control (OCC)**: if the transaction's snapshot version does not match the current committed version, the commit is aborted with a serialisation conflict. The client SDK retries transparently (up to 20 attempts).
+3. Writes modified pages into the mmap (under `mmapMu`).
+4. Appends commit records to the WAL and fsyncs.
+5. Publishes the new B-tree root and increments the version.
+
+Because pages are allocated from a central counter under `pageAllocMu`, concurrent writers never step on each other's page numbers. The version-gap OCC check prevents the "divergent roots" problem where two writers simultaneously modify disjoint keys but one overwrites the other's tree root.
+
+Aborting a transaction simply discards the in-memory update map. Because nothing was written to disk, abort is instantaneous and infallible.
 
 ### Key-Value Store (`kv/`)
 
@@ -114,11 +131,30 @@ The query layer provides a SQL-like interpreter. It consists of a lexer, a recur
 
 **DELETE** removes rows matching the WHERE clause.
 
-**SELECT** returns rows from a table, optionally filtered by a WHERE clause and projected to a named column list or `*`. When the WHERE clause is a simple comparison on the first primary-key column, the executor pushes it down into a B-tree range scan. All other filtering is applied in memory after the scan.
+**SELECT** returns rows from one or more tables. Supports:
+
+- Single-table queries with optional WHERE filter
+- **INNER JOIN** and **LEFT JOIN** with ON conditions
+- Table aliases (`FROM users u JOIN orders o ON u.id == o.user_id`)
+- Qualified column references (`users.id`, `orders.total`)
+- Star expansion (`SELECT *`) across all joined tables
+- Arbitrary-depth join chains (three or more tables)
+
+**JOIN syntax:**
+
+```sql
+SELECT cols FROM t1 [alias]
+  [JOIN t2 [alias] ON condition] ...
+  [WHERE expr]
+```
+
+LEFT JOIN emits NULL values (zero-typed) for the right-side columns when no match exists.
 
 #### WHERE Expressions
 
 WHERE accepts binary expressions with comparison operators (`==`, `!=`, `<`, `<=`, `>`, `>=`) and arithmetic operators (`+`, `-`, `*`, `/`). Operands may be integer literals, single-quoted string literals, or column references.
+
+When the WHERE clause is a simple comparison on the first primary-key column of a single-table query, the executor pushes it down into a B-tree range scan. All other filtering is applied in memory after the scan.
 
 #### Session and Statement Streaming
 
@@ -139,11 +175,11 @@ Every message in both directions uses the same fixed-size frame header:
 ```
 ┌──────────┬──────────┬────────────┬──────────────────┐
 │ MsgType  │ ReqID    │ PayloadLen │ Payload          │
-│ 1 byte   │ 4 bytes  │ 4 bytes    │ PayloadLen bytes  │
+│ 1 byte   │ 4 bytes  │ 4 bytes    │ PayloadLen bytes │
 └──────────┴──────────┴────────────┴──────────────────┘
 ```
 
-All multi-byte integers are big-endian. The `ReqID` field is a monotonically increasing counter assigned by the client and echoed in the server's response, which provides a foundation for future pipelining without changing the frame format.
+All multi-byte integers are big-endian. The `ReqID` field is a monotonically increasing counter assigned by the client and echoed in the server's response.
 
 ### Message Types
 
@@ -154,6 +190,18 @@ All multi-byte integers are big-endian. The `ReqID` field is a monotonically inc
 | Server → Client  | Result   | `0x81` | Successful query result          |
 | Server → Client  | Error    | `0x82` | Query or protocol error          |
 | Server → Client  | Pong     | `0x83` | Ping response                    |
+
+### Connection Multiplexing
+
+The client SDK supports **multiple in-flight requests** over a single TCP connection. A background reader goroutine reads frames from the connection and dispatches each response to the correct waiting caller via a channel keyed by `ReqID`. This means you can fire several queries concurrently and collect their results as they arrive:
+
+```go
+ch1 := conn.ExecAsync("SELECT ...")
+ch2 := conn.ExecAsync("SELECT ...")
+r1, r2 := <-ch1, <-ch2
+```
+
+The server also dispatches queries to goroutines: after reading a frame, it parses the SQL and hands execution to a new goroutine. A per-connection write mutex serialises the resulting `MsgResult`/`MsgError` frames back to the wire, so responses may arrive in any order (identified by `ReqID`).
 
 ### Query Payload
 
@@ -173,15 +221,102 @@ The Error payload is a 4-byte length-prefixed UTF-8 string containing the error 
 
 The `network` package doubles as the client SDK. Any Go application can import it and connect to a running ElkDB server with three lines of setup.
 
-The central type is `Conn`, obtained by calling `Dial` with the server address. `Conn` exposes two methods: `Exec`, which sends a SQL string and returns a `Result`, and `Ping`, which verifies the connection is alive. `Result` carries an `Affected` count for write statements and a `Rows` slice for SELECT statements; each row is a `table.Record` with named columns and typed values.
+The central type is `Conn`, obtained by calling `Dial` with the server address.
 
-The protocol is currently synchronous: each `Exec` call sends one request and waits for one response before returning. This keeps the SDK simple and correct; pipelining can be layered on top in a future version without changing the frame format.
+### Blocking API
+
+- **`Exec(sql string) (Result, error)`** — sends a SQL string and returns the result. OCC conflicts are retried transparently.
+- **`Ping() error`** — verifies the connection is alive.
+
+### Async API
+
+- **`ExecAsync(sql string) <-chan ResultWithError`** — sends a SQL string and returns a buffered channel that will receive the result. Non-blocking; the caller may do other work before receiving.
+- **`PingAsync() <-chan ResultWithError`** — same pattern for pings.
+
+`ResultWithError` contains:
+
+```go
+type ResultWithError struct {
+    Result Result  // query result (rows + affected count)
+    Err    error   // non-nil on failure
+}
+```
+
+`Result` carries an `Affected` count for write statements and a `Rows` slice for SELECT statements; each row is a `table.Record` with named columns and typed values.
 
 ### Example Application
 
-The following sketch shows a Go program that connects to an ElkDB server, creates a table, inserts a few rows, and queries them back. It uses only the `network` package and the `tables` package for type constants — no other ElkDB internals are needed.
+The following sketch shows a Go program that connects to an ElkDB server, creates two tables, inserts data with a foreign-key relationship, runs a JOIN query, and demonstrates the async API. It uses only the `network` package and the `tables` package for type constants — no other ElkDB internals are needed.
 
-The program dials the server, checks reachability with a ping, issues a `CREATE TABLE` statement, inserts three rows, and then runs a `SELECT` to retrieve all of them. Each returned row is a `table.Record`; the program iterates over its `Cols` and `Vals` slices to print column names and values. Integer values are accessed through the `I64` field; byte string values through the `Str` field. The type of each value is indicated by its `Type` field, which is one of `table.TypeInt64` or `table.TypeBytes`.
+```go
+package main
+
+import (
+    "fmt"
+    "log"
+
+    "github.com/MHS-20/ElkDB/network"
+    table "github.com/MHS-20/ElkDB/tables"
+)
+
+func main() {
+    conn, err := network.Dial("localhost:5433")
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer conn.Close()
+
+    // Create tables.
+    conn.Exec(`CREATE TABLE users (id INT, name TEXT, age INT, PRIMARY KEY (id));`)
+    conn.Exec(`CREATE TABLE orders (id INT, user_id INT, total INT, PRIMARY KEY (id));`)
+
+    // Insert users.
+    conn.Exec(`INSERT INTO users (id, name, age) VALUES (1, 'alice', 30);`)
+    conn.Exec(`INSERT INTO users (id, name, age) VALUES (2, 'bob', 25);`)
+
+    // Insert orders.
+    conn.Exec(`INSERT INTO orders (id, user_id, total) VALUES (10, 1, 100);`)
+    conn.Exec(`INSERT INTO orders (id, user_id, total) VALUES (20, 2, 200);`)
+    conn.Exec(`INSERT INTO orders (id, user_id, total) VALUES (30, 1, 50);`)
+
+    // INNER JOIN.
+    res, _ := conn.Exec(
+        `SELECT users.name, orders.total ` +
+        `FROM users JOIN orders ON users.id == orders.user_id;`,
+    )
+    fmt.Println("user orders:")
+    for _, row := range res.Rows {
+        fmt.Printf("  %s total=%d\n", row.Get("users.name").Str, row.Get("orders.total").I64)
+    }
+
+    // LEFT JOIN (users with no orders get NULL total).
+    res, _ = conn.Exec(
+        `SELECT users.name, orders.total ` +
+        `FROM users LEFT JOIN orders ON users.id == orders.user_id;`,
+    )
+    fmt.Println("\nall users with orders (LEFT JOIN):")
+    for _, row := range res.Rows {
+        name := row.Get("users.name").Str
+        total := row.Get("orders.total")
+        if total.Type == 0 { // zero type = NULL
+            fmt.Printf("  %s no orders\n", name)
+        } else {
+            fmt.Printf("  %s total=%d\n", name, total.I64)
+        }
+    }
+
+    // Async API: fire two queries concurrently.
+    ch1 := conn.ExecAsync(`SELECT * FROM users WHERE id == 1;`)
+    ch2 := conn.ExecAsync(`SELECT * FROM users WHERE id == 2;`)
+
+    r1 := <-ch1
+    r2 := <-ch2
+    fmt.Printf("\nasync results: %s age=%d, %s age=%d\n",
+        r1.Result.Rows[0].Get("name").Str, r1.Result.Rows[0].Get("age").I64,
+        r2.Result.Rows[0].Get("name").Str, r2.Result.Rows[0].Get("age").I64,
+    )
+}
+```
 
 ---
 
@@ -241,9 +376,7 @@ Then connect with the CLI:
 
 ## Limitations
 
-- A single write transaction runs at a time. Concurrent read throughput is unlimited; write throughput is limited to one transaction per commit cycle.
-- The SQL WHERE clause only pushes down simple comparisons on the first primary-key column into the B-tree range scan. Filtering on non-key columns is applied in memory after a full or partial scan.
-- There are no `JOIN`, `GROUP BY`, `ORDER BY`, or aggregate functions.
-- The network protocol is currently synchronous (one request in flight per connection). Pipelining is not yet implemented.
+- WHERE pushdown is limited to simple comparisons on the first primary-key column. All other filtering is applied in memory after scanning.
+- No `GROUP BY`, `ORDER BY`, or aggregate functions.
 - Column types are limited to 64-bit integers and variable-length byte strings.
 - The maximum key size is 1000 bytes; the maximum value size is 3000 bytes.
