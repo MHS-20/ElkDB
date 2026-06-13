@@ -29,9 +29,10 @@ import (
 func newSession(t *testing.T, path string) *Session {
 	t.Helper()
 	os.Remove(path)
+	os.Remove(path + ".wal")
 	s, err := NewSession(path)
 	is.NoError(t, err)
-	t.Cleanup(func() { s.Close(); os.Remove(path) })
+	t.Cleanup(func() { s.Close(); os.Remove(path); os.Remove(path + ".wal") })
 	return s
 }
 

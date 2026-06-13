@@ -200,35 +200,75 @@ func (kv *KV) Commit(tx *KVTX) error {
 		return nil // nothing changed
 	}
 
-	// Phase 1: write page data.
-	if err := writePages(tx); err != nil {
+	// 1. Collect freed pages and update the freelist.
+	freed := make([]uint64, 0, len(tx.page.updates))
+	for ptr, page := range tx.page.updates {
+		if page == nil {
+			freed = append(freed, ptr)
+		}
+	}
+	slices.Sort(freed)
+	tx.free.Add(freed)
+
+	// 2. Write modified pages into the mmap so readers can see them.
+	newFlushed := kv.page.flushed + uint64(tx.page.nappend)
+	db := tx.kv
+	npages := int(db.page.flushed) + tx.page.nappend
+	if err := extendFile(db, npages); err != nil {
 		return err
 	}
-
-	// fsync so page data reaches disk before the master page is updated.
-	if !kv.NoSync {
-		if err := kv.fp.Sync(); err != nil {
-			return fmt.Errorf("fsync: %w", err)
+	if err := extendMmap(db, npages); err != nil {
+		return err
+	}
+	tx.mmap.chunks = db.mmap.chunks
+	for ptr, page := range tx.page.updates {
+		if page != nil {
+			src := page
+			dst := pageGetMapped(tx.mmap.chunks, ptr).Data
+			copy(dst, src)
 		}
 	}
 
-	// Publish the new state.
-	kv.page.flushed += uint64(tx.page.nappend)
+	// 3. Write the transaction to the WAL for crash recovery.
+	if err := kv.wal.BeginTX(kv.version); err != nil {
+		return fmt.Errorf("WAL begin: %w", err)
+	}
+	for ptr, page := range tx.page.updates {
+		if page == nil {
+			continue
+		}
+		if err := kv.wal.PageData(kv.version, ptr, page); err != nil {
+			return fmt.Errorf("WAL page data: %w", err)
+		}
+	}
+	if err := kv.wal.CommitTX(kv.version, commitState{
+		Root:        tx.tree.Root,
+		FreeHead:    tx.free.FreeListData.Head,
+		PageFlushed: newFlushed,
+	}); err != nil {
+		return fmt.Errorf("WAL commit: %w", err)
+	}
+
+	// 4. fsync the WAL so the commit is durable (main DB fsync deferred to checkpoint).
+	if !kv.NoSync {
+		if err := kv.wal.Sync(); err != nil {
+			return fmt.Errorf("WAL fsync: %w", err)
+		}
+	}
+
+	// 5. Publish the new in-memory state so subsequent reads see it.
+	kv.page.flushed = newFlushed
 	kv.free = tx.free.FreeListData
 	kv.mu.Lock()
 	kv.tree.root = tx.tree.Root
 	kv.version++
 	kv.mu.Unlock()
 
-	// Phase 2: update the master page.
-	// NOTE: if this or the following fsync fails there is no safe rollback —
+	// 6. Write the master page (no fsync) so other sessions can open the DB
+	// without needing WAL recovery. On next open, if WAL has data it will be
+	// recovered; otherwise the master page is the sole source of truth.
 	if err := masterStore(kv); err != nil {
-		return err
-	}
-	if !kv.NoSync {
-		if err := kv.fp.Sync(); err != nil {
-			return fmt.Errorf("fsync: %w", err)
-		}
+		return fmt.Errorf("commit master store: %w", err)
 	}
 	return nil
 }
@@ -241,35 +281,4 @@ func (kv *KV) Abort(tx *KVTX) {
 	// In-memory updates are simply abandoned; nothing was written to disk.
 }
 
-// writePages extends the file and mmap if necessary, then copies all modified
-// pages into the mmap so they will be flushed by the subsequent Sync.
-func writePages(tx *KVTX) error {
-	freed := make([]uint64, 0, len(tx.page.updates))
-	for ptr, page := range tx.page.updates {
-		if page == nil {
-			freed = append(freed, ptr)
-		}
-	}
-	slices.Sort(freed)
-	// sort.Slice(freed, func(i, j int) bool { return freed[i] < freed[j] })
-	tx.free.Add(freed)
 
-	db := tx.kv
-	npages := int(db.page.flushed) + tx.page.nappend
-	if err := extendFile(db, npages); err != nil {
-		return err
-	}
-	if err := extendMmap(db, npages); err != nil {
-		return err
-	}
-
-	// Refresh the transaction's chunk snapshot so pageGetMapped sees new pages.
-	tx.mmap.chunks = db.mmap.chunks
-	for ptr, page := range tx.page.updates {
-		if page != nil {
-			copy(pageGetMapped(tx.mmap.chunks, ptr).Data, page)
-			//	copy(tx.PageGet(ptr).Data, page)
-		}
-	}
-	return nil
-}

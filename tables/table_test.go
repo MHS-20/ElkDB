@@ -18,6 +18,7 @@ type tableTester struct {
 
 func newTableTester() *tableTester {
 	os.Remove("r.db")
+	os.Remove("r.db.wal")
 	tt := &tableTester{
 		db:  DB{Path: "r.db"},
 		ref: map[string][]Record{},
@@ -30,6 +31,7 @@ func newTableTester() *tableTester {
 func (tt *tableTester) dispose() {
 	tt.db.Close()
 	os.Remove("r.db")
+	os.Remove("r.db.wal")
 }
 
 func (tt *tableTester) create(tdef *TableDef) {

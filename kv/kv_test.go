@@ -18,6 +18,7 @@ type kvTester struct {
 
 func newKVTester() *kvTester {
 	os.Remove("test.db")
+	os.Remove("test.db.wal")
 	kvt := &kvTester{ref: map[string]string{}}
 	kvt.db.Path = "test.db"
 	kvt.db.NoSync = true
@@ -36,6 +37,7 @@ func (kvt *kvTester) reopen() {
 func (kvt *kvTester) dispose() {
 	kvt.db.Close()
 	os.Remove("test.db")
+	os.Remove("test.db.wal")
 }
 
 func (kvt *kvTester) add(key, val string) {

@@ -1,3 +1,4 @@
 *.db
 elkdb
 elkdb-server
+AGENTS.md

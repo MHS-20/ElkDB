@@ -26,6 +26,7 @@ type KV struct {
 	NoSync bool // skip fsync (useful in tests; dangerous in production)
 
 	fp   *os.File
+	wal  *WAL
 	tree struct {
 		root uint64
 	}
@@ -55,25 +56,49 @@ func (kv *KV) Open() error {
 
 	sz, chunk, err := mmapInit(kv.fp)
 	if err != nil {
-		goto fail
+		kv.Close()
+		return fmt.Errorf("KV.Open: %w", err)
 	}
 	kv.mmap.file = sz
 	kv.mmap.total = len(chunk)
 	kv.mmap.chunks = [][]byte{chunk}
 
-	err = masterLoad(kv)
-	if err != nil {
-		goto fail
+	if err := masterLoad(kv); err != nil {
+		kv.Close()
+		return fmt.Errorf("KV.Open: %w", err)
 	}
-	return nil
 
-fail:
-	kv.Close()
-	return fmt.Errorf("KV.Open: %w", err)
+	walPath := kv.Path + ".wal"
+	wal, err := OpenWAL(walPath)
+	if err != nil {
+		kv.Close()
+		return fmt.Errorf("KV.Open: %w", err)
+	}
+	kv.wal = wal
+
+	hasData, err := wal.HasData()
+	if err != nil {
+		kv.Close()
+		return fmt.Errorf("KV.Open: %w", err)
+	}
+	if hasData {
+		if err := wal.Recover(kv); err != nil {
+			kv.Close()
+			return fmt.Errorf("KV.Open: %w", err)
+		}
+	}
+
+	return nil
 }
 
 // Close unmaps all pages and closes the file.
 func (kv *KV) Close() {
+	if kv.wal != nil {
+		if hasData, _ := kv.wal.HasData(); hasData {
+			_ = kv.wal.Checkpoint(kv)
+		}
+		_ = kv.wal.Close()
+	}
 	for _, chunk := range kv.mmap.chunks {
 		err := syscall.Munmap(chunk)
 		assert(err == nil)
