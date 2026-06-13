@@ -4,6 +4,7 @@ import (
 	"container/heap"
 	"fmt"
 	"slices"
+	"sync"
 
 	"github.com/MHS-20/ElkDB/btree"
 )
@@ -16,8 +17,9 @@ type KVReader struct {
 	mmap    struct {
 		chunks [][]byte // snapshot of db.mmap.chunks at the moment Begin was called
 	}
-	index int  // position in the KV.readers heap
-	done  bool // true after EndRead
+	mmapMu *sync.RWMutex // shared reference to KV.mmapMu
+	index  int           // position in the KV.readers heap
+	done   bool          // true after EndRead
 }
 
 // BeginRead opens a new read transaction, taking a snapshot of the current
@@ -28,6 +30,7 @@ func (kv *KV) BeginRead(tx *KVReader) {
 	tx.tree.Root = kv.tree.root
 	tx.tree.Store = tx // KVReader implements btree.PageStore (read-only subset)
 	tx.version = kv.version
+	tx.mmapMu = &kv.mmapMu
 	heap.Push(&kv.readers, tx)
 	kv.mu.Unlock()
 }
@@ -45,6 +48,8 @@ func (kv *KV) EndRead(tx *KVReader) {
 // It satisfies the read-only part of btree.PageStore so BTree.Get and
 // BTree.Seek work on a KVReader.
 func (tx *KVReader) PageGet(ptr uint64) btree.BNode {
+	tx.mmapMu.RLock()
+	defer tx.mmapMu.RUnlock()
 	return pageGetMapped(tx.mmap.chunks, ptr)
 }
 
@@ -92,23 +97,39 @@ type KVTX struct {
 	KVReader // embedded snapshot (provides Get, Seek, PageGet for committed pages)
 	kv       *KV
 	free     *btree.FreeList
+	readSet  map[uint64]struct{} // pages read from committed state (for OCC conflict detection)
 	page     struct {
-		nappend int               // number of pages to append to the file
+		nappend int               // number of pages appended by this tx
 		updates map[uint64][]byte // nil value = page is freed; non-nil = new content
 	}
+	// pageCache holds copies of mmap pages read during this transaction.
+	// Separate from updates to avoid treating cached reads as writes at commit time.
+	pageCache map[uint64][]byte
 }
 
 // --- btree.PageStore implementation for KVTX (read + write path) ---
 
 // PageGet returns the BNode at ptr, preferring in-transaction updates over
-// the on-disk mmap copy.
+// the on-disk mmap copy.  Pages read from the mmap are copied into private
+// memory (pageCache) so that concurrent commits (which write to the shared
+// mmap) do not corrupt this transaction's snapshot.
 func (tx *KVTX) PageGet(ptr uint64) btree.BNode {
 	assert(ptr != 0)
+	tx.readSet[ptr] = struct{}{}
 	if page, ok := tx.page.updates[ptr]; ok {
 		assert(page != nil)
 		return btree.BNode{Data: page}
 	}
-	return pageGetMapped(tx.mmap.chunks, ptr)
+	if cached, ok := tx.pageCache[ptr]; ok {
+		return btree.BNode{Data: cached}
+	}
+	tx.kv.mmapMu.RLock()
+	src := pageGetMapped(tx.mmap.chunks, ptr)
+	buf := make([]byte, btree.PageSize)
+	copy(buf, src.Data)
+	tx.kv.mmapMu.RUnlock()
+	tx.pageCache[ptr] = buf
+	return btree.BNode{Data: buf}
 }
 
 // PageNew allocates a page: reuses a free page if available, otherwise appends.
@@ -128,9 +149,14 @@ func (tx *KVTX) PageDel(ptr uint64) {
 
 // PageAppend allocates a brand-new page beyond the current file end.
 // Used by both PageNew (overflow) and the FreeList (via btree.FreeListStore).
+// Page numbers are handed out under pageAllocMu so that concurrent writers
+// each get unique page numbers.
 func (tx *KVTX) PageAppend(node btree.BNode) uint64 {
 	assert(len(node.Data) <= btree.PageSize)
-	ptr := tx.kv.page.flushed + uint64(tx.page.nappend)
+	tx.kv.pageAllocMu.Lock()
+	ptr := tx.kv.pageAlloc
+	tx.kv.pageAlloc++
+	tx.kv.pageAllocMu.Unlock()
 	tx.page.nappend++
 	tx.page.updates[ptr] = node.Data
 	return ptr
@@ -161,14 +187,17 @@ func (tx *KVTX) Del(req *btree.DeleteReq) bool {
 
 // --- transaction lifecycle ---
 
-// Begin opens a new write transaction.  The writer mutex is held until
-// Commit or Abort is called.
+// Begin opens a new write transaction.
+// Unlike the old single-writer model, this is non-blocking — multiple KVTX
+// instances may exist simultaneously. The commit phase is serialised via
+// commitMu and uses OCC conflict detection.
 func (kv *KV) Begin(tx *KVTX) {
 	tx.kv = kv
 	tx.page.updates = map[uint64][]byte{}
+	tx.pageCache = map[uint64][]byte{}
+	tx.readSet = map[uint64]struct{}{}
 	tx.mmap.chunks = kv.mmap.chunks
 
-	kv.writer.Lock()
 	tx.version = kv.version
 
 	// Wire the B-tree to this transaction's page store.
@@ -190,14 +219,32 @@ func (kv *KV) Begin(tx *KVTX) {
 	assert(tx.page.nappend == 0 && len(tx.page.updates) == 0)
 }
 
-// Commit persists the transaction and releases the writer lock.
+// Commit persists the transaction using OCC.
+// Under commitMu it performs conflict detection, then writes pages to the
+// mmap, appends commit records to the WAL, fsyncs the WAL, and publishes
+// the new in-memory state.
 func (kv *KV) Commit(tx *KVTX) error {
 	assert(!tx.done)
 	tx.done = true
-	defer kv.writer.Unlock()
 
+	kv.commitMu.Lock()
+	defer kv.commitMu.Unlock()
+
+	// --- OCC conflict detection ---
+	// If another writer committed after this tx began (version advanced),
+	// our snapshot is stale. The tree root changed, so the new root we
+	// computed does not incorporate the other tx's changes. We must abort
+	// to prevent lost updates.
+	if tx.version != kv.version {
+		return fmt.Errorf("serialisation conflict: retry transaction")
+	}
+
+	// Fast path: nothing changed.
+	// Checked *after* the version guard (under commitMu) so a concurrent
+	// commit that coincidentally produces the same root page number does
+	// not trick us into a false match (TOCTOU race).
 	if kv.tree.root == tx.tree.Root {
-		return nil // nothing changed
+		return nil
 	}
 
 	// 1. Collect freed pages and update the freelist.
@@ -211,9 +258,14 @@ func (kv *KV) Commit(tx *KVTX) error {
 	tx.free.Add(freed)
 
 	// 2. Write modified pages into the mmap so readers can see them.
-	newFlushed := kv.page.flushed + uint64(tx.page.nappend)
+	newFlushed := kv.page.flushed
+	for ptr, page := range tx.page.updates {
+		if page != nil && ptr >= newFlushed {
+			newFlushed = ptr + 1
+		}
+	}
 	db := tx.kv
-	npages := int(db.page.flushed) + tx.page.nappend
+	npages := int(newFlushed)
 	if err := extendFile(db, npages); err != nil {
 		return err
 	}
@@ -221,6 +273,7 @@ func (kv *KV) Commit(tx *KVTX) error {
 		return err
 	}
 	tx.mmap.chunks = db.mmap.chunks
+	kv.mmapMu.Lock()
 	for ptr, page := range tx.page.updates {
 		if page != nil {
 			src := page
@@ -228,6 +281,7 @@ func (kv *KV) Commit(tx *KVTX) error {
 			copy(dst, src)
 		}
 	}
+	kv.mmapMu.Unlock()
 
 	// 3. Write the transaction to the WAL for crash recovery.
 	if err := kv.wal.BeginTX(kv.version); err != nil {
@@ -265,20 +319,15 @@ func (kv *KV) Commit(tx *KVTX) error {
 	kv.mu.Unlock()
 
 	// 6. Write the master page (no fsync) so other sessions can open the DB
-	// without needing WAL recovery. On next open, if WAL has data it will be
-	// recovered; otherwise the master page is the sole source of truth.
+	// without needing WAL recovery.
 	if err := masterStore(kv); err != nil {
 		return fmt.Errorf("commit master store: %w", err)
 	}
 	return nil
 }
 
-// Abort rolls back the transaction and releases the writer lock.
+// Abort rolls back the transaction.
 func (kv *KV) Abort(tx *KVTX) {
 	assert(!tx.done)
 	tx.done = true
-	kv.writer.Unlock()
-	// In-memory updates are simply abandoned; nothing was written to disk.
 }
-
-

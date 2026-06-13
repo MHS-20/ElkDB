@@ -41,8 +41,19 @@ type KV struct {
 	}
 
 	mu      sync.Mutex
-	writer  sync.Mutex // held for the duration of every write transaction
 	version uint64
+
+	// commitMu serialises the commit phase across concurrent writers.
+	// Only held during Commit (not the full transaction lifetime).
+	commitMu    sync.Mutex
+	pageAllocMu sync.Mutex // serialises page-number allocation in PageAppend
+	pageAlloc   uint64     // next page number to hand out (monotonic)
+
+	// mmapMu protects the mapped page data from concurrent writes during
+	// commit.  Readers acquire RLock, the commit's mmap-copy phase acquires
+	// Lock.  This prevents readers from seeing partially-written pages.
+	mmapMu sync.RWMutex
+
 	readers readerList // min-heap tracking the oldest active reader version
 }
 
@@ -88,6 +99,7 @@ func (kv *KV) Open() error {
 		}
 	}
 
+	kv.pageAlloc = kv.page.flushed
 	return nil
 }
 
@@ -194,6 +206,7 @@ func masterLoad(kv *KV) error {
 	kv.tree.root = root
 	kv.free.Head = free
 	kv.page.flushed = used
+	kv.pageAlloc = used
 	kv.version = version
 	return nil
 }

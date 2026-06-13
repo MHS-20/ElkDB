@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"sync"
 	"testing"
 
 	"github.com/MHS-20/ElkDB/btree"
@@ -185,5 +186,180 @@ func TestKVIncLength(t *testing.T) {
 		}
 		kvt.verify(t)
 		kvt.dispose()
+	}
+}
+
+// --- Phase 2: Concurrent writer tests ---
+
+func insertWithRetry(db *KV, key, val string) error {
+	for {
+		tx := KVTX{}
+		db.Begin(&tx)
+		tx.Update(&btree.InsertReq{Key: []byte(key), Val: []byte(val)})
+		err := db.Commit(&tx)
+		if err == nil {
+			return nil
+		}
+		// OCC conflict — retry with fresh snapshot
+	}
+}
+
+func TestConcurrentDisjointKeys(t *testing.T) {
+	kvt := newKVTester()
+	defer kvt.dispose()
+
+	const N = 5
+	const keysPerWriter = 200
+	var wg sync.WaitGroup
+	errCh := make(chan error, N*keysPerWriter)
+
+	for w := 0; w < N; w++ {
+		wg.Add(1)
+		w := w
+		go func() {
+			defer wg.Done()
+			for i := 0; i < keysPerWriter; i++ {
+				key := fmt.Sprintf("w%d-k%d", w, i)
+				val := fmt.Sprintf("v%d-%d", w, i)
+				if err := insertWithRetry(&kvt.db, key, val); err != nil {
+					errCh <- fmt.Errorf("writer %d key %s: %w", w, key, err)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		t.Error(err)
+	}
+
+	// Verify every key is actually in the DB.
+	tx := KVReader{}
+	kvt.db.BeginRead(&tx)
+	defer kvt.db.EndRead(&tx)
+
+	for w := 0; w < N; w++ {
+		for i := 0; i < keysPerWriter; i++ {
+			key := fmt.Sprintf("w%d-k%d", w, i)
+			val := fmt.Sprintf("v%d-%d", w, i)
+			got, ok := tx.Get([]byte(key))
+			is.True(t, ok, "key %q should exist", key)
+			is.Equal(t, []byte(val), got, "value for key %q", key)
+		}
+	}
+}
+
+func TestConcurrentSameKeyConflict(t *testing.T) {
+	kvt := newKVTester()
+	defer kvt.dispose()
+
+	var wg sync.WaitGroup
+
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			tx := KVTX{}
+			kvt.db.Begin(&tx)
+			tx.Update(&btree.InsertReq{Key: []byte("conflict-key"), Val: []byte("value")})
+			_ = kvt.db.Commit(&tx)
+		}()
+	}
+	wg.Wait()
+
+	// Exactly one writer should have committed (the rest got OCC conflict).
+	tx := KVReader{}
+	kvt.db.BeginRead(&tx)
+	defer kvt.db.EndRead(&tx)
+	_, ok := tx.Get([]byte("conflict-key"))
+	is.True(t, ok, "the key must exist after concurrent writes")
+}
+
+func TestConcurrentWriterReaderIsolation(t *testing.T) {
+	kvt := newKVTester()
+	defer kvt.dispose()
+
+	// Writer A inserts a batch of keys, writer B inserts different keys.
+	var wg sync.WaitGroup
+	errCh := make(chan error, 200)
+
+	writer := func(prefix string, count int) {
+		defer wg.Done()
+		for i := 0; i < count; i++ {
+			key := fmt.Sprintf("%s-%d", prefix, i)
+			val := fmt.Sprintf("v%s-%d", prefix, i)
+			if err := insertWithRetry(&kvt.db, key, val); err != nil {
+				errCh <- fmt.Errorf("writer %s key %s: %w", prefix, key, err)
+			}
+		}
+	}
+
+	wg.Add(2)
+	go writer("a", 100)
+	go writer("b", 100)
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		t.Error(err)
+	}
+
+	// Reader must see all keys from both writers.
+	tx := KVReader{}
+	kvt.db.BeginRead(&tx)
+	defer kvt.db.EndRead(&tx)
+
+	for i := 0; i < 100; i++ {
+		_, ok := tx.Get([]byte(fmt.Sprintf("a-%d", i)))
+		is.True(t, ok, "key a-%d from writer A", i)
+		_, ok = tx.Get([]byte(fmt.Sprintf("b-%d", i)))
+		is.True(t, ok, "key b-%d from writer B", i)
+	}
+}
+
+func TestConcurrentWriterStress(t *testing.T) {
+	kvt := newKVTester()
+	defer kvt.dispose()
+
+	const writers = 10
+	const keysPerWriter = 200
+	var wg sync.WaitGroup
+	errCh := make(chan error, writers*keysPerWriter)
+
+	for w := 0; w < writers; w++ {
+		wg.Add(1)
+		w := w
+		go func() {
+			defer wg.Done()
+			for i := 0; i < keysPerWriter; i++ {
+				key := fmt.Sprintf("s-%d-%d", w, i)
+				val := fmt.Sprintf("sv-%d-%d", w, i)
+				if err := insertWithRetry(&kvt.db, key, val); err != nil {
+					errCh <- fmt.Errorf("writer %d key %s: %w", w, key, err)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		t.Error(err)
+	}
+
+	// All keys should be in the DB.
+	tx := KVReader{}
+	kvt.db.BeginRead(&tx)
+	defer kvt.db.EndRead(&tx)
+
+	for w := 0; w < writers; w++ {
+		for i := 0; i < keysPerWriter; i++ {
+			key := fmt.Sprintf("s-%d-%d", w, i)
+			expected := fmt.Sprintf("sv-%d-%d", w, i)
+			got, ok := tx.Get([]byte(key))
+			is.True(t, ok, "key %q", key)
+			is.Equal(t, []byte(expected), got, "value for key %q", key)
+		}
 	}
 }

@@ -221,13 +221,16 @@ func (wal *WAL) checkpointApply(kv *KV, entries []walEntry, state *commitState) 
 		return fmt.Errorf("checkpoint extend mmap: %w", err)
 	}
 
+	kv.mmapMu.Lock()
 	for _, e := range entries {
 		copy(pageGetMapped(kv.mmap.chunks, e.pageNum).Data, e.data)
 	}
+	kv.mmapMu.Unlock()
 
 	kv.tree.root = state.Root
 	kv.free.Head = state.FreeHead
 	kv.page.flushed = state.PageFlushed
+	kv.pageAlloc = state.PageFlushed
 
 	if err := masterStore(kv); err != nil {
 		return fmt.Errorf("checkpoint master store: %w", err)
