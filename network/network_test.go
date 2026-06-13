@@ -741,6 +741,106 @@ func TestMultiplex_ConcurrentInserts(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Async API tests
+// ---------------------------------------------------------------------------
+
+func TestAsync_Exec(t *testing.T) {
+	conn, cleanup := startServer(t)
+	defer cleanup()
+
+	mustExec(t, conn, `CREATE TABLE async1 (id INT, val TEXT, PRIMARY KEY (id));`)
+	mustExec(t, conn, `INSERT INTO async1 (id, val) VALUES (1, 'hello');`)
+
+	ch := conn.ExecAsync(`SELECT * FROM async1 WHERE id == 1;`)
+	r := <-ch
+	if r.Err != nil {
+		t.Fatalf("ExecAsync: %v", r.Err)
+	}
+	if len(r.Result.Rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(r.Result.Rows))
+	}
+	if string(r.Result.Rows[0].Get("val").Str) != "hello" {
+		t.Errorf("val: got %q, want 'hello'", string(r.Result.Rows[0].Get("val").Str))
+	}
+}
+
+func TestAsync_Ping(t *testing.T) {
+	conn, cleanup := startServer(t)
+	defer cleanup()
+
+	ch := conn.PingAsync()
+	r := <-ch
+	if r.Err != nil {
+		t.Fatalf("PingAsync: %v", r.Err)
+	}
+}
+
+func TestAsync_MultipleInFlight(t *testing.T) {
+	conn, cleanup := startServer(t)
+	defer cleanup()
+
+	mustExec(t, conn, `CREATE TABLE async2 (id INT, val TEXT, PRIMARY KEY (id));`)
+	mustExec(t, conn, `INSERT INTO async2 (id, val) VALUES (1, 'a');`)
+	mustExec(t, conn, `INSERT INTO async2 (id, val) VALUES (2, 'b');`)
+
+	// Fire two async queries and collect results from channels.
+	ch1 := conn.ExecAsync(`SELECT * FROM async2 WHERE id == 1;`)
+	ch2 := conn.ExecAsync(`SELECT * FROM async2 WHERE id == 2;`)
+
+	r1 := <-ch1
+	r2 := <-ch2
+
+	if r1.Err != nil {
+		t.Errorf("ch1 err: %v", r1.Err)
+	}
+	if r2.Err != nil {
+		t.Errorf("ch2 err: %v", r2.Err)
+	}
+	if len(r1.Result.Rows) != 1 || r1.Result.Rows[0].Get("id").I64 != 1 {
+		t.Errorf("ch1: expected id=1")
+	}
+	if len(r2.Result.Rows) != 1 || r2.Result.Rows[0].Get("id").I64 != 2 {
+		t.Errorf("ch2: expected id=2")
+	}
+}
+
+func TestAsync_ExecAndPingConcurrent(t *testing.T) {
+	conn, cleanup := startServer(t)
+	defer cleanup()
+
+	mustExec(t, conn, `CREATE TABLE async3 (id INT, val TEXT, PRIMARY KEY (id));`)
+	mustExec(t, conn, `INSERT INTO async3 (id, val) VALUES (99, 'data');`)
+
+	// Fire ping + exec concurrently via async.
+	pingCh := conn.PingAsync()
+	execCh := conn.ExecAsync(`SELECT * FROM async3 WHERE id == 99;`)
+
+	pingResult := <-pingCh
+	execResult := <-execCh
+
+	if pingResult.Err != nil {
+		t.Errorf("async ping: %v", pingResult.Err)
+	}
+	if execResult.Err != nil {
+		t.Errorf("async exec: %v", execResult.Err)
+	}
+	if len(execResult.Result.Rows) != 1 {
+		t.Errorf("expected 1 row, got %d", len(execResult.Result.Rows))
+	}
+}
+
+func TestAsync_ErrorPropagation(t *testing.T) {
+	conn, cleanup := startServer(t)
+	defer cleanup()
+
+	ch := conn.ExecAsync(`SELECT * FROM nonexistent;`)
+	r := <-ch
+	if r.Err == nil {
+		t.Fatal("expected error for missing table, got nil")
+	}
+}
+
+// ---------------------------------------------------------------------------
 // safeBuffer — an in-memory io.ReadWriter safe for use in codec unit tests
 // ---------------------------------------------------------------------------
 
