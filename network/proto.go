@@ -284,6 +284,11 @@ func ReadError(r io.Reader, payloadLen uint32) (string, error) {
 	if _, err := io.ReadFull(r, payload); err != nil {
 		return "", err
 	}
+	return parseErrorPayload(payload)
+}
+
+// parseErrorPayload decodes an error message from a raw MsgError payload.
+func parseErrorPayload(payload []byte) (string, error) {
 	if len(payload) < 4 {
 		return "", fmt.Errorf("error payload too short")
 	}

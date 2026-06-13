@@ -583,6 +583,164 @@ func TestConnectionClosedMidQuery(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Multiplex tests
+// ---------------------------------------------------------------------------
+
+func TestMultiplex_TwoExecsConcurrent(t *testing.T) {
+	conn, cleanup := startServer(t)
+	defer cleanup()
+
+	mustExec(t, conn, `CREATE TABLE mux1 (id INT, val TEXT, PRIMARY KEY (id));`)
+	mustExec(t, conn, `INSERT INTO mux1 (id, val) VALUES (1, 'a');`)
+	mustExec(t, conn, `INSERT INTO mux1 (id, val) VALUES (2, 'b');`)
+
+	// Fire two SELECT queries concurrently and wait for both.
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		res, err := conn.Exec(`SELECT * FROM mux1 WHERE id == 1;`)
+		if err != nil {
+			errs <- fmt.Errorf("q1: %w", err)
+			return
+		}
+		if len(res.Rows) != 1 {
+			errs <- fmt.Errorf("q1: expected 1 row, got %d", len(res.Rows))
+		}
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		res, err := conn.Exec(`SELECT * FROM mux1 WHERE id == 2;`)
+		if err != nil {
+			errs <- fmt.Errorf("q2: %w", err)
+			return
+		}
+		if len(res.Rows) != 1 {
+			errs <- fmt.Errorf("q2: expected 1 row, got %d", len(res.Rows))
+		}
+	}()
+
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+}
+
+func TestMultiplex_ExecAndPing(t *testing.T) {
+	conn, cleanup := startServer(t)
+	defer cleanup()
+
+	mustExec(t, conn, `CREATE TABLE mux2 (id INT, val TEXT, PRIMARY KEY (id));`)
+	mustExec(t, conn, `INSERT INTO mux2 (id, val) VALUES (1, 'hello');`)
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := conn.Ping(); err != nil {
+			errs <- fmt.Errorf("ping: %w", err)
+		}
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		res, err := conn.Exec(`SELECT * FROM mux2 WHERE id == 1;`)
+		if err != nil {
+			errs <- fmt.Errorf("exec: %w", err)
+			return
+		}
+		if len(res.Rows) != 1 {
+			errs <- fmt.Errorf("exec: expected 1 row, got %d", len(res.Rows))
+		}
+	}()
+
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+}
+
+func TestMultiplex_ThreeConcurrentQueries(t *testing.T) {
+	conn, cleanup := startServer(t)
+	defer cleanup()
+
+	mustExec(t, conn, `CREATE TABLE mux3 (id INT, val TEXT, PRIMARY KEY (id));`)
+	for i := 0; i < 10; i++ {
+		mustExec(t, conn, fmt.Sprintf(
+			`INSERT INTO mux3 (id, val) VALUES (%d, 'v%d');`, i, i,
+		))
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 3)
+
+	for _, id := range []int{1, 5, 9} {
+		id := id
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			res, err := conn.Exec(fmt.Sprintf(`SELECT * FROM mux3 WHERE id == %d;`, id))
+			if err != nil {
+				errs <- fmt.Errorf("q%d: %w", id, err)
+				return
+			}
+			if len(res.Rows) != 1 {
+				errs <- fmt.Errorf("q%d: expected 1 row, got %d", id, len(res.Rows))
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+}
+
+func TestMultiplex_ConcurrentInserts(t *testing.T) {
+	conn, cleanup := startServer(t)
+	defer cleanup()
+
+	mustExec(t, conn, `CREATE TABLE mux4 (id INT, val TEXT, PRIMARY KEY (id));`)
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 5)
+
+	for i := 0; i < 5; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := conn.Exec(fmt.Sprintf(
+				`INSERT INTO mux4 (id, val) VALUES (%d, 'concurrent');`, i,
+			))
+			if err != nil {
+				errs <- fmt.Errorf("insert %d: %w", i, err)
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+
+	// Verify all 5 rows made it.
+	res := mustExec(t, conn, `SELECT * FROM mux4;`)
+	requireRowCount(t, res, 5)
+}
+
+// ---------------------------------------------------------------------------
 // safeBuffer — an in-memory io.ReadWriter safe for use in codec unit tests
 // ---------------------------------------------------------------------------
 

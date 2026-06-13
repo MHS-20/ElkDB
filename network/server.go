@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"strings"
+	"sync"
 
 	"github.com/MHS-20/ElkDB/queries"
 	table "github.com/MHS-20/ElkDB/tables"
@@ -45,6 +46,7 @@ func (s *Server) ListenAndServe() error {
 
 // handleConn runs the per-connection read loop. It opens a dedicated Session
 // for this connection and closes it when the connection drops.
+// Queries are dispatched to goroutines for concurrent execution.
 func (s *Server) handleConn(conn net.Conn) {
 	defer conn.Close()
 	remote := conn.RemoteAddr().String()
@@ -53,7 +55,6 @@ func (s *Server) handleConn(conn net.Conn) {
 	session, err := queries.NewSession(s.DBPath)
 	if err != nil {
 		log.Printf("elkdb-server: [%s] failed to open session: %v", remote, err)
-		// Best-effort: tell the client something went wrong then hang up.
 		_ = SendError(conn, 0, fmt.Sprintf("server could not open db: %v", err))
 		return
 	}
@@ -63,6 +64,8 @@ func (s *Server) handleConn(conn net.Conn) {
 	}()
 
 	r := bufio.NewReader(conn)
+	var wmu sync.Mutex // serialises writes to the wire
+
 	for {
 		frame, err := ReadFrame(r)
 		if err != nil {
@@ -77,17 +80,19 @@ func (s *Server) handleConn(conn net.Conn) {
 			sql, _, err := ReadQuery(r, frame.PayloadLen)
 			if err != nil {
 				log.Printf("elkdb-server: [%s] malformed query: %v", remote, err)
+				wmu.Lock()
 				_ = SendError(conn, frame.ReqID, "malformed query frame")
+				wmu.Unlock()
 				return
 			}
-			s.execAndRespond(conn, session, frame.ReqID, sql)
+			go s.execAndRespond(conn, &wmu, session, frame.ReqID, sql)
 
 		case MsgPing:
-			// No payload to read (payloadLen == 0).
-			if err := SendPong(conn, frame.ReqID); err != nil {
-				log.Printf("elkdb-server: [%s] pong write error: %v", remote, err)
-				return
-			}
+			go func(reqID uint32) {
+				wmu.Lock()
+				_ = SendPong(conn, reqID)
+				wmu.Unlock()
+			}(frame.ReqID)
 
 		default:
 			log.Printf("elkdb-server: [%s] unknown message type 0x%02x, discarding", remote, frame.MsgType)
@@ -99,26 +104,54 @@ func (s *Server) handleConn(conn net.Conn) {
 }
 
 // execAndRespond runs one SQL string and writes a MsgResult or MsgError back.
-func (s *Server) execAndRespond(w io.Writer, session *queries.Session, reqID uint32, sql string) {
-	results, err := session.ExecChunk(sql + "\n")
+// Called from a goroutine; wmu synchronises writes to the wire.
+func (s *Server) execAndRespond(w io.Writer, wmu *sync.Mutex, session *queries.Session, reqID uint32, sql string) {
+	// Parse the statement. We do this outside the transaction so we can
+	// reject a bad parse without consuming a commit slot.
+	stmt, err := queries.ParseStatement(sql)
 	if err != nil {
+		wmu.Lock()
 		_ = SendError(w, reqID, err.Error())
+		wmu.Unlock()
 		return
 	}
 
-	// Merge all statement results into a single Result to send back.
-	// For multi-statement chunks we accumulate rows and affected counts.
-	merged := Result{}
-	for _, r := range results {
-		merged.Affected += r.Affected
-		for _, row := range r.Rows {
-			merged.Rows = append(merged.Rows, convertRecord(row))
-		}
+	tx := table.DBTX{}
+	session.DB.Begin(&tx)
+
+	var result queries.Result
+	if stmt.Kind == queries.StmtSelect {
+		result, err = queries.ReaderExecString(&tx, sql)
+	} else {
+		result, err = queries.WriterExecString(&tx, sql)
 	}
 
+	if err != nil {
+		session.DB.Abort(&tx)
+		wmu.Lock()
+		_ = SendError(w, reqID, err.Error())
+		wmu.Unlock()
+		return
+	}
+
+	if err := session.DB.Commit(&tx); err != nil {
+		wmu.Lock()
+		_ = SendError(w, reqID, err.Error())
+		wmu.Unlock()
+		return
+	}
+
+	merged := Result{}
+	merged.Affected += result.Affected
+	for _, row := range result.Rows {
+		merged.Rows = append(merged.Rows, convertRecord(row))
+	}
+
+	wmu.Lock()
 	if err := SendResult(w, reqID, merged); err != nil {
 		log.Printf("elkdb-server: result write error: %v", err)
 	}
+	wmu.Unlock()
 }
 
 // convertRecord converts a queries.Result row (table.Record) to the network

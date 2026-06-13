@@ -3,7 +3,10 @@ package network
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"net"
+	"strings"
+	"sync"
 	"sync/atomic"
 )
 
@@ -11,9 +14,15 @@ import (
 // Client / SDK
 // ---------------------------------------------------------------------------
 
-// Conn is a client connection to an ElkDB server. It is safe to use from a
-// single goroutine; for concurrent use create one Conn per goroutine or add
-// your own locking.
+type response struct {
+	result Result
+	err    error
+}
+
+// Conn is a client connection to an ElkDB server. It supports multiplexed
+// requests: multiple Exec / Ping calls may be in-flight concurrently.
+// Responses are dispatched to the correct caller by a background reader
+// goroutine.
 //
 // Typical usage:
 //
@@ -24,9 +33,18 @@ import (
 //	res, err := c.Exec("INSERT INTO users (id, name) VALUES (1, 'alice');")
 //	res, err := c.Exec("SELECT * FROM users;")
 type Conn struct {
-	conn   net.Conn
-	r      *bufio.Reader
-	nextID uint32 // atomically incremented request counter
+	conn net.Conn
+	r    *bufio.Reader
+
+	wmu     sync.Mutex               // serialises writes to the wire
+	pending map[uint32]chan response // reqID → response channel
+	pdMu    sync.Mutex               // guards pending
+	nextID  uint32                   // atomically incremented request counter
+
+	stopReader chan struct{}
+	readerDone chan struct{}
+	closeMu    sync.Mutex
+	closed     bool
 }
 
 // Dial opens a TCP connection to an ElkDB server at addr (e.g. "localhost:5433").
@@ -35,77 +53,195 @@ func Dial(addr string) (*Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("elkdb dial %s: %w", addr, err)
 	}
-	return &Conn{
-		conn: nc,
-		r:    bufio.NewReader(nc),
-	}, nil
+	c := &Conn{
+		conn:       nc,
+		r:          bufio.NewReader(nc),
+		pending:    make(map[uint32]chan response),
+		stopReader: make(chan struct{}),
+		readerDone: make(chan struct{}),
+	}
+	go c.readerLoop()
+	return c, nil
 }
 
-// Close shuts down the connection.
+// Close shuts down the connection and waits for the background reader to
+// finish. All in-flight requests receive a "connection closed" error.
 func (c *Conn) Close() error {
-	return c.conn.Close()
+	c.closeMu.Lock()
+	if c.closed {
+		c.closeMu.Unlock()
+		return nil
+	}
+	c.closed = true
+	close(c.stopReader)
+	err := c.conn.Close()
+	c.closeMu.Unlock()
+	<-c.readerDone
+	return err
 }
 
 // Exec sends a SQL string to the server and returns the merged result.
-// The sql string may contain multiple semicolon-separated statements.
+// Multiple Exec calls may be in-flight concurrently; they are multiplexed
+// over the same TCP connection. OCC conflicts are retried transparently
+// (up to 20 attempts).
 func (c *Conn) Exec(sql string) (Result, error) {
-	reqID := atomic.AddUint32(&c.nextID, 1)
-	readOnly := isSelect(sql)
+	const maxRetries = 20
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		reqID := atomic.AddUint32(&c.nextID, 1)
+		readOnly := isSelect(sql)
 
-	if err := SendQuery(c.conn, reqID, sql, readOnly); err != nil {
-		return Result{}, fmt.Errorf("send query: %w", err)
+		ch := make(chan response, 1)
+
+		c.pdMu.Lock()
+		c.pending[reqID] = ch
+		c.pdMu.Unlock()
+
+		c.wmu.Lock()
+		err := SendQuery(c.conn, reqID, sql, readOnly)
+		c.wmu.Unlock()
+
+		if err != nil {
+			c.pdMu.Lock()
+			delete(c.pending, reqID)
+			c.pdMu.Unlock()
+			return Result{}, fmt.Errorf("send query: %w", err)
+		}
+
+		r := <-ch
+		if r.err != nil {
+			// Transparently retry OCC conflicts.
+			if attempt < maxRetries-1 && strings.Contains(r.err.Error(), "serialisation conflict") {
+				continue
+			}
+			return Result{}, r.err
+		}
+		return r.result, nil
 	}
-	return c.readResponse(reqID)
+	return Result{}, fmt.Errorf("max retries exceeded for OCC conflict")
 }
 
 // Ping checks that the server is reachable.
 func (c *Conn) Ping() error {
 	reqID := atomic.AddUint32(&c.nextID, 1)
-	if err := SendPing(c.conn, reqID); err != nil {
+
+	ch := make(chan response, 1)
+
+	c.pdMu.Lock()
+	c.pending[reqID] = ch
+	c.pdMu.Unlock()
+
+	c.wmu.Lock()
+	err := SendPing(c.conn, reqID)
+	c.wmu.Unlock()
+
+	if err != nil {
+		c.pdMu.Lock()
+		delete(c.pending, reqID)
+		c.pdMu.Unlock()
 		return fmt.Errorf("send ping: %w", err)
 	}
-	frame, err := ReadFrame(c.r)
-	if err != nil {
-		return fmt.Errorf("read pong: %w", err)
-	}
-	if frame.MsgType != MsgPong {
-		_ = DiscardPayload(c.r, frame.PayloadLen)
-		return fmt.Errorf("expected pong, got 0x%02x", frame.MsgType)
-	}
-	return nil
+
+	r := <-ch
+	return r.err
 }
 
-// readResponse reads the next frame from the server, expecting it to match
-// reqID, and returns the decoded result or error.
-func (c *Conn) readResponse(reqID uint32) (Result, error) {
-	frame, err := ReadFrame(c.r)
-	if err != nil {
-		return Result{}, fmt.Errorf("read response: %w", err)
-	}
-	if frame.ReqID != reqID {
-		// Out-of-order response — the protocol is currently synchronous so
-		// this should never happen. Discard and surface as an error.
-		_ = DiscardPayload(c.r, frame.PayloadLen)
-		return Result{}, fmt.Errorf("unexpected reqID %d (want %d)", frame.ReqID, reqID)
-	}
+// readerLoop runs in a background goroutine, reads frames from the
+// connection, and dispatches them to the waiting Exec / Ping callers.
+func (c *Conn) readerLoop() {
+	defer close(c.readerDone)
 
-	switch frame.MsgType {
-	case MsgResult:
-		res, err := ReadResult(c.r, frame.PayloadLen)
-		if err != nil {
-			return Result{}, fmt.Errorf("decode result: %w", err)
+	// Frame-reading goroutine so we can select on stopReader.
+	type frameResult struct {
+		frame   Frame
+		payload []byte
+		err     error
+	}
+	frameCh := make(chan frameResult, 1)
+	go func() {
+		for {
+			frame, err := ReadFrame(c.r)
+			if err != nil {
+				select {
+				case frameCh <- frameResult{err: err}:
+				case <-c.stopReader:
+				}
+				return
+			}
+
+			// Read the full payload while still on the read goroutine.
+			var payload []byte
+			if frame.PayloadLen > 0 {
+				payload = make([]byte, frame.PayloadLen)
+				if _, err := io.ReadFull(c.r, payload); err != nil {
+					select {
+					case frameCh <- frameResult{err: err}:
+					case <-c.stopReader:
+					}
+					return
+				}
+			}
+
+			select {
+			case frameCh <- frameResult{
+				frame:   Frame{MsgType: frame.MsgType, ReqID: frame.ReqID, PayloadLen: frame.PayloadLen},
+				payload: payload,
+			}:
+			case <-c.stopReader:
+				return
+			}
 		}
-		return res, nil
+	}()
 
-	case MsgError:
-		msg, err := ReadError(c.r, frame.PayloadLen)
-		if err != nil {
-			return Result{}, fmt.Errorf("decode error: %w", err)
+	for {
+		select {
+		case <-c.stopReader:
+			c.failPending(fmt.Errorf("connection closed"))
+			return
+		case rr := <-frameCh:
+			if rr.err != nil {
+				c.failPending(fmt.Errorf("connection closed: %w", rr.err))
+				return
+			}
+
+			frame := rr.frame
+			payload := rr.payload
+
+			c.pdMu.Lock()
+			ch, ok := c.pending[frame.ReqID]
+			if ok {
+				delete(c.pending, frame.ReqID)
+			}
+			c.pdMu.Unlock()
+
+			if !ok {
+				continue // unknown reqID, discard
+			}
+
+			switch frame.MsgType {
+			case MsgResult:
+				res, err := decodeResult(payload)
+				ch <- response{result: res, err: err}
+			case MsgError:
+				msg, err := parseErrorPayload(payload)
+				if err != nil {
+					ch <- response{err: err}
+				} else {
+					ch <- response{err: fmt.Errorf("%s", msg)}
+				}
+			case MsgPong:
+				ch <- response{}
+			default:
+				ch <- response{err: fmt.Errorf("unexpected message type 0x%02x", frame.MsgType)}
+			}
 		}
-		return Result{}, fmt.Errorf("%s", msg)
-
-	default:
-		_ = DiscardPayload(c.r, frame.PayloadLen)
-		return Result{}, fmt.Errorf("unexpected message type 0x%02x", frame.MsgType)
 	}
+}
+
+func (c *Conn) failPending(err error) {
+	c.pdMu.Lock()
+	for _, ch := range c.pending {
+		ch <- response{err: err}
+	}
+	c.pending = nil
+	c.pdMu.Unlock()
 }
