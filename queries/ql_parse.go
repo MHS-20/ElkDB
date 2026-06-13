@@ -242,6 +242,14 @@ func (p *parser) parseAtom() (Expr, error) {
 	case TokenStr:
 		return Expr{Kind: ExprStr, Str: []byte(t.Text)}, nil
 	case TokenIdent:
+		// Check for table.col qualified reference.
+		if p.sym(".") {
+			sub, err := p.expectIdent()
+			if err != nil {
+				return Expr{}, err
+			}
+			return Expr{Kind: ExprCol, Col: t.Text + "." + sub}, nil
+		}
 		return Expr{Kind: ExprCol, Col: t.Text}, nil
 	case TokenSym:
 		if t.Text == "(" {
@@ -411,12 +419,7 @@ func ParseStatement(input string) (Statement, error) {
 	return Statement{}, fmt.Errorf("unknown statement keyword: %s", kw)
 }
 
-// SELECT col, ... FROM table [WHERE expr] [cmp1 key1 cmp2 key2]
-// The WHERE clause here is a simple primary-key range, e.g.:
-//
-//	WHERE id >= 1 AND id <= 100
-//
-// Full expression filtering is handled post-scan inside qlSelect.
+// SELECT col, ... FROM table [[AS] alias] [JOIN ...] [WHERE expr]
 func (p *parser) parseSelect() (Statement, error) {
 	stmt := Statement{Kind: StmtSelect}
 
@@ -430,7 +433,16 @@ func (p *parser) parseSelect() (Statement, error) {
 			if err != nil {
 				return stmt, err
 			}
-			stmt.Cols = append(stmt.Cols, col)
+			// Check for table.col qualified reference
+			if p.sym(".") {
+				sub, err := p.expectIdent()
+				if err != nil {
+					return stmt, err
+				}
+				stmt.Cols = append(stmt.Cols, col+"."+sub)
+			} else {
+				stmt.Cols = append(stmt.Cols, col)
+			}
 			if !p.sym(",") {
 				break
 			}
@@ -440,11 +452,52 @@ func (p *parser) parseSelect() (Statement, error) {
 	if !p.keyword("FROM") {
 		return stmt, fmt.Errorf("expected FROM")
 	}
-	tbl, err := p.expectIdent()
+
+	// Parse first table reference.
+	ref, err := p.parseTableRef(JoinInner)
 	if err != nil {
 		return stmt, err
 	}
-	stmt.Table = tbl
+	stmt.Tables = append(stmt.Tables, ref)
+
+	// Parse JOIN clauses.
+	for {
+		joinType := JoinInner
+		joinFound := false
+
+		if p.keyword("JOIN") {
+			joinFound = true
+		} else if p.keyword("LEFT") {
+			joinType = JoinLeft
+			p.keyword("OUTER") // optional
+			if !p.keyword("JOIN") {
+				return stmt, fmt.Errorf("expected JOIN after LEFT")
+			}
+			joinFound = true
+		} else if p.keyword("INNER") || p.keyword("CROSS") {
+			if !p.keyword("JOIN") {
+				return stmt, fmt.Errorf("expected JOIN")
+			}
+			joinFound = true
+		}
+
+		if !joinFound {
+			break
+		}
+		ref, err := p.parseTableRef(joinType)
+		if err != nil {
+			return stmt, err
+		}
+		if !p.keyword("ON") {
+			return stmt, fmt.Errorf("expected ON after JOIN")
+		}
+		onExpr, err := p.parseExpr()
+		if err != nil {
+			return stmt, err
+		}
+		ref.OnExpr = &onExpr
+		stmt.Tables = append(stmt.Tables, ref)
+	}
 
 	// Optional WHERE
 	if p.keyword("WHERE") {
@@ -458,6 +511,44 @@ func (p *parser) parseSelect() (Statement, error) {
 	return stmt, nil
 }
 
+// parseTableRef parses a table name followed by an optional alias.
+func (p *parser) parseTableRef(joinType JoinType) (TableRef, error) {
+	ref := TableRef{JoinType: joinType}
+	name, err := p.expectIdent()
+	if err != nil {
+		return ref, err
+	}
+	ref.Name = name
+	// Check for optional alias (next identifier that isn't a JOIN/WHERE/ON keyword).
+	if t := p.peek(); t.Kind == TokenIdent {
+		up := upper(t.Text)
+		if up != "JOIN" && up != "INNER" && up != "LEFT" && up != "CROSS" &&
+			up != "ON" && up != "WHERE" && up != "AS" && up != "ORDER" &&
+			up != "GROUP" && up != "LIMIT" && up != "HAVING" {
+			ref.Alias = t.Text
+			p.consume()
+		} else if up == "AS" {
+			p.consume()
+			alias, err := p.expectIdent()
+			if err != nil {
+				return ref, err
+			}
+			ref.Alias = alias
+		}
+	}
+	return ref, nil
+}
+
+func upper(s string) string {
+	b := []byte(s)
+	for i := range b {
+		if b[i] >= 'a' && b[i] <= 'z' {
+			b[i] -= 32
+		}
+	}
+	return string(b)
+}
+
 // INSERT INTO table (col, ...) VALUES (expr, ...)
 func (p *parser) parseInsert(mode int) (Statement, error) {
 	stmt := Statement{Kind: StmtInsert, Mode: mode}
@@ -469,7 +560,7 @@ func (p *parser) parseInsert(mode int) (Statement, error) {
 	if err != nil {
 		return stmt, err
 	}
-	stmt.Table = tbl
+	stmt.Tables = append(stmt.Tables, TableRef{Name: tbl})
 
 	// Column list
 	if _, err := p.expect(TokenSym, "("); err != nil {
@@ -524,7 +615,7 @@ func (p *parser) parseUpdate() (Statement, error) {
 	if err != nil {
 		return stmt, err
 	}
-	stmt.Table = tbl
+	stmt.Tables = append(stmt.Tables, TableRef{Name: tbl})
 
 	if !p.keyword("SET") {
 		return stmt, fmt.Errorf("expected SET")
@@ -569,7 +660,7 @@ func (p *parser) parseDelete() (Statement, error) {
 	if err != nil {
 		return stmt, err
 	}
-	stmt.Table = tbl
+	stmt.Tables = append(stmt.Tables, TableRef{Name: tbl})
 
 	if p.keyword("WHERE") {
 		expr, err := p.parseExpr()
@@ -593,7 +684,7 @@ func (p *parser) parseCreateTable() (Statement, error) {
 	if err != nil {
 		return stmt, err
 	}
-	stmt.Table = tbl
+	stmt.Tables = append(stmt.Tables, TableRef{Name: tbl})
 
 	if _, err := p.expect(TokenSym, "("); err != nil {
 		return stmt, err
@@ -660,7 +751,7 @@ func (p *parser) parseCreateTable() (Statement, error) {
 	}
 
 	if stmt.PKeys == 0 {
-		return stmt, fmt.Errorf("CREATE TABLE %s: missing PRIMARY KEY", stmt.Table)
+		return stmt, fmt.Errorf("CREATE TABLE %s: missing PRIMARY KEY", stmt.Table())
 	}
 
 	return stmt, nil

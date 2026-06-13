@@ -344,6 +344,244 @@ func TestSession_UpsertThroughSession(t *testing.T) {
 	is.Equal(t, []byte("second"), res.Rows[0].Get("v").Str)
 }
 
+// ---------------------------------------------------------------------------
+// Join tests
+// ---------------------------------------------------------------------------
+
+func TestJoin_TwoTableInner(t *testing.T) {
+	s := newSession(t, "join1.db")
+
+	s.SendChunk(t, "CREATE TABLE users (id INT, name TEXT, PRIMARY KEY (id));")
+	s.SendChunk(t, "CREATE TABLE orders (id INT, user_id INT, total INT, PRIMARY KEY (id));")
+
+	s.SendChunk(t, "INSERT INTO users (id, name) VALUES (1, 'alice');")
+	s.SendChunk(t, "INSERT INTO users (id, name) VALUES (2, 'bob');")
+	s.SendChunk(t, "INSERT INTO orders (id, user_id, total) VALUES (10, 1, 100);")
+	s.SendChunk(t, "INSERT INTO orders (id, user_id, total) VALUES (20, 2, 200);")
+	s.SendChunk(t, "INSERT INTO orders (id, user_id, total) VALUES (30, 1, 50);")
+
+	tx := table.DBTX{}
+	s.DB.Begin(&tx)
+	res, err := ReaderExecString(&tx,
+		"SELECT users.name, orders.total FROM users JOIN orders ON users.id == orders.user_id;")
+	is.NoError(t, err)
+	s.DB.Abort(&tx)
+
+	is.Len(t, res.Rows, 3)
+	// alice=100, alice=50, bob=200 (order depends on PK scan order)
+	names := map[int64]string{}
+	for _, r := range res.Rows {
+		name := string(r.Get("users.name").Str)
+		total := r.Get("orders.total").I64
+		names[total] = name
+	}
+	is.Equal(t, "alice", names[100])
+	is.Equal(t, "alice", names[50])
+	is.Equal(t, "bob", names[200])
+}
+
+func TestJoin_WithWhere(t *testing.T) {
+	s := newSession(t, "join2.db")
+
+	s.SendChunk(t, "CREATE TABLE users (id INT, name TEXT, PRIMARY KEY (id));")
+	s.SendChunk(t, "CREATE TABLE orders (id INT, user_id INT, total INT, PRIMARY KEY (id));")
+
+	s.SendChunk(t, "INSERT INTO users (id, name) VALUES (1, 'alice');")
+	s.SendChunk(t, "INSERT INTO users (id, name) VALUES (2, 'bob');")
+	s.SendChunk(t, "INSERT INTO orders (id, user_id, total) VALUES (10, 1, 100);")
+	s.SendChunk(t, "INSERT INTO orders (id, user_id, total) VALUES (20, 2, 200);")
+	s.SendChunk(t, "INSERT INTO orders (id, user_id, total) VALUES (30, 1, 50);")
+
+	tx := table.DBTX{}
+	s.DB.Begin(&tx)
+	res, err := ReaderExecString(&tx,
+		"SELECT users.name, orders.total FROM users JOIN orders ON users.id == orders.user_id WHERE orders.total >= 100;")
+	is.NoError(t, err)
+	s.DB.Abort(&tx)
+
+	is.Len(t, res.Rows, 2)
+}
+
+func TestJoin_ColumnProjection(t *testing.T) {
+	s := newSession(t, "join3.db")
+
+	s.SendChunk(t, "CREATE TABLE users (id INT, name TEXT, score INT, PRIMARY KEY (id));")
+	s.SendChunk(t, "CREATE TABLE orders (id INT, user_id INT, total INT, PRIMARY KEY (id));")
+
+	s.SendChunk(t, "INSERT INTO users (id, name, score) VALUES (1, 'alice', 100);")
+	s.SendChunk(t, "INSERT INTO orders (id, user_id, total) VALUES (10, 1, 200);")
+
+	tx := table.DBTX{}
+	s.DB.Begin(&tx)
+	res, err := ReaderExecString(&tx,
+		"SELECT users.name, orders.total FROM users JOIN orders ON users.id == orders.user_id;")
+	is.NoError(t, err)
+	s.DB.Abort(&tx)
+
+	is.Len(t, res.Rows, 1)
+	r := res.Rows[0]
+	is.Equal(t, []byte("alice"), r.Get("users.name").Str)
+	is.Equal(t, int64(200), r.Get("orders.total").I64)
+}
+
+func TestJoin_ThreeTable(t *testing.T) {
+	s := newSession(t, "join4.db")
+
+	s.SendChunk(t, "CREATE TABLE users (id INT, name TEXT, PRIMARY KEY (id));")
+	s.SendChunk(t, "CREATE TABLE orders (id INT, user_id INT, PRIMARY KEY (id));")
+	s.SendChunk(t, "CREATE TABLE items (id INT, order_id INT, product TEXT, PRIMARY KEY (id));")
+
+	s.SendChunk(t, "INSERT INTO users (id, name) VALUES (1, 'alice');")
+	s.SendChunk(t, "INSERT INTO orders (id, user_id) VALUES (10, 1);")
+	s.SendChunk(t, "INSERT INTO orders (id, user_id) VALUES (20, 2);")
+	s.SendChunk(t, "INSERT INTO items (id, order_id, product) VALUES (100, 10, 'widget');")
+	s.SendChunk(t, "INSERT INTO items (id, order_id, product) VALUES (200, 10, 'gizmo');")
+
+	tx := table.DBTX{}
+	s.DB.Begin(&tx)
+	res, err := ReaderExecString(&tx,
+		"SELECT users.name, items.product FROM users JOIN orders ON users.id == orders.user_id JOIN items ON orders.id == items.order_id;")
+	is.NoError(t, err)
+	s.DB.Abort(&tx)
+
+	is.Len(t, res.Rows, 2)
+}
+
+func TestJoin_LeftJoin(t *testing.T) {
+	s := newSession(t, "join5.db")
+
+	s.SendChunk(t, "CREATE TABLE users (id INT, name TEXT, PRIMARY KEY (id));")
+	s.SendChunk(t, "CREATE TABLE orders (id INT, user_id INT, total INT, PRIMARY KEY (id));")
+
+	s.SendChunk(t, "INSERT INTO users (id, name) VALUES (1, 'alice');")
+	s.SendChunk(t, "INSERT INTO users (id, name) VALUES (2, 'bob');")
+	s.SendChunk(t, "INSERT INTO orders (id, user_id, total) VALUES (10, 1, 100);")
+
+	tx := table.DBTX{}
+	s.DB.Begin(&tx)
+	res, err := ReaderExecString(&tx,
+		"SELECT users.name, orders.total FROM users LEFT JOIN orders ON users.id == orders.user_id;")
+	is.NoError(t, err)
+	s.DB.Abort(&tx)
+
+	is.Len(t, res.Rows, 2)
+
+	// Find the bob row (should have null total)
+	for _, r := range res.Rows {
+		name := string(r.Get("users.name").Str)
+		if name == "bob" {
+			// LEFT JOIN: bob has no orders, so total should be 0/unknown
+			is.Equal(t, uint32(0), r.Get("orders.total").Type)
+		}
+	}
+}
+
+func TestJoin_ErrorAmbiguousColumn(t *testing.T) {
+	s := newSession(t, "join6.db")
+
+	s.SendChunk(t, "CREATE TABLE t1 (id INT, val INT, PRIMARY KEY (id));")
+	s.SendChunk(t, "CREATE TABLE t2 (id INT, val INT, PRIMARY KEY (id));")
+
+	tx := table.DBTX{}
+	s.DB.Begin(&tx)
+	_, err := ReaderExecString(&tx,
+		"SELECT val FROM t1 JOIN t2 ON t1.id == t2.id;")
+	is.Error(t, err)
+	is.Contains(t, err.Error(), "ambiguous")
+	s.DB.Abort(&tx)
+}
+
+func TestJoin_ErrorNonExistentTable(t *testing.T) {
+	s := newSession(t, "join7.db")
+
+	s.SendChunk(t, "CREATE TABLE t1 (id INT, PRIMARY KEY (id));")
+
+	tx := table.DBTX{}
+	s.DB.Begin(&tx)
+	_, err := ReaderExecString(&tx,
+		"SELECT * FROM t1 JOIN ghost ON t1.id == ghost.id;")
+	is.Error(t, err)
+	is.Contains(t, err.Error(), "not found")
+	s.DB.Abort(&tx)
+}
+
+func TestJoin_ErrorJoinWithoutOn(t *testing.T) {
+	_, err := ParseStatement("SELECT * FROM t1 JOIN t2;")
+	is.Error(t, err)
+	is.Contains(t, err.Error(), "expected ON")
+}
+
+func TestJoin_LargeData(t *testing.T) {
+	s := newSession(t, "join9.db")
+
+	s.SendChunk(t, "CREATE TABLE t1 (id INT, val INT, PRIMARY KEY (id));")
+	s.SendChunk(t, "CREATE TABLE t2 (id INT, ref INT, PRIMARY KEY (id));")
+
+	// Insert 100 rows in each table.
+	for i := 0; i < 100; i++ {
+		s.SendChunk(t, "INSERT INTO t1 (id, val) VALUES ("+itoa(i)+", "+itoa(i*10)+");")
+		s.SendChunk(t, "INSERT INTO t2 (id, ref) VALUES ("+itoa(i)+", "+itoa(i)+");")
+	}
+
+	tx := table.DBTX{}
+	s.DB.Begin(&tx)
+	res, err := ReaderExecString(&tx,
+		"SELECT t1.val, t2.ref FROM t1 JOIN t2 ON t1.id == t2.ref;")
+	is.NoError(t, err)
+	s.DB.Abort(&tx)
+
+	is.Len(t, res.Rows, 100)
+}
+
+func TestJoin_Alias(t *testing.T) {
+	s := newSession(t, "join10.db")
+
+	s.SendChunk(t, "CREATE TABLE users (id INT, name TEXT, PRIMARY KEY (id));")
+	s.SendChunk(t, "CREATE TABLE orders (id INT, user_id INT, total INT, PRIMARY KEY (id));")
+
+	s.SendChunk(t, "INSERT INTO users (id, name) VALUES (1, 'alice');")
+	s.SendChunk(t, "INSERT INTO orders (id, user_id, total) VALUES (10, 1, 100);")
+
+	tx := table.DBTX{}
+	s.DB.Begin(&tx)
+	res, err := ReaderExecString(&tx,
+		"SELECT u.name, o.total FROM users u JOIN orders o ON u.id == o.user_id;")
+	is.NoError(t, err)
+	s.DB.Abort(&tx)
+
+	is.Len(t, res.Rows, 1)
+	r := res.Rows[0]
+	is.Equal(t, []byte("alice"), r.Get("u.name").Str)
+	is.Equal(t, int64(100), r.Get("o.total").I64)
+}
+
+func TestJoin_StarExpand(t *testing.T) {
+	s := newSession(t, "join11.db")
+
+	s.SendChunk(t, "CREATE TABLE users (id INT, name TEXT, PRIMARY KEY (id));")
+	s.SendChunk(t, "CREATE TABLE orders (id INT, user_id INT, total INT, PRIMARY KEY (id));")
+
+	s.SendChunk(t, "INSERT INTO users (id, name) VALUES (1, 'alice');")
+	s.SendChunk(t, "INSERT INTO orders (id, user_id, total) VALUES (10, 1, 100);")
+
+	tx := table.DBTX{}
+	s.DB.Begin(&tx)
+	res, err := ReaderExecString(&tx,
+		"SELECT * FROM users JOIN orders ON users.id == orders.user_id;")
+	is.NoError(t, err)
+	s.DB.Abort(&tx)
+
+	is.Len(t, res.Rows, 1)
+	r := res.Rows[0]
+	// Should have 5 columns: users.id, users.name, orders.id, orders.user_id, orders.total
+	is.Len(t, r.Cols, 5)
+	is.Equal(t, int64(1), r.Get("users.id").I64)
+	is.Equal(t, []byte("alice"), r.Get("users.name").Str)
+	is.Equal(t, int64(10), r.Get("orders.id").I64)
+	is.Equal(t, int64(1), r.Get("orders.user_id").I64)
+	is.Equal(t, int64(100), r.Get("orders.total").I64)
+}
+
 func TestSession_LargeBatch(t *testing.T) {
 	s := newSession(t, "sess12.db")
 	s.SendChunk(t, "CREATE TABLE t (id int64, v int64, PRIMARY KEY (id));")

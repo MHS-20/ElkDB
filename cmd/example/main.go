@@ -15,13 +15,17 @@ func main() {
 	}
 	defer db.Close()
 
-	// Create table.
+	// Create tables.
 	_, err = db.Exec(`CREATE TABLE users (id INT, name TEXT, age INT, PRIMARY KEY (id));`)
 	if err != nil {
 		log.Fatal(err)
 	}
+	_, err = db.Exec(`CREATE TABLE orders (id INT, user_id INT, total INT, PRIMARY KEY (id));`)
+	if err != nil {
+		log.Fatal(err)
+	}
 
-	// Insert some rows.
+	// Insert users.
 	inserts := []string{
 		`INSERT INTO users (id, name, age) VALUES (1, 'alice', 30);`,
 		`INSERT INTO users (id, name, age) VALUES (2, 'bob', 25);`,
@@ -35,7 +39,21 @@ func main() {
 		fmt.Printf("inserted: affected=%d\n", res.Affected)
 	}
 
-	// Read all rows.
+	// Insert orders.
+	orderInserts := []string{
+		`INSERT INTO orders (id, user_id, total) VALUES (10, 1, 100);`,
+		`INSERT INTO orders (id, user_id, total) VALUES (20, 2, 200);`,
+		`INSERT INTO orders (id, user_id, total) VALUES (30, 1, 50);`,
+	}
+	for _, sql := range orderInserts {
+		res, err := db.Exec(sql)
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Printf("inserted order: affected=%d\n", res.Affected)
+	}
+
+	// Read all users.
 	res, err := db.Exec(`SELECT * FROM users;`)
 	if err != nil {
 		log.Fatal(err)
@@ -45,7 +63,7 @@ func main() {
 		fmt.Println(rowStr(row))
 	}
 
-	// Read a single row by primary key.
+	// Read a single user by primary key.
 	res, err = db.Exec(`SELECT * FROM users WHERE id == 2;`)
 	if err != nil {
 		log.Fatal(err)
@@ -54,6 +72,28 @@ func main() {
 	for _, row := range res.Rows {
 		fmt.Println(rowStr(row))
 	}
+
+	// JOIN users with orders.
+	res, err = db.Exec(`SELECT users.name, orders.total FROM users JOIN orders ON users.id == orders.user_id;`)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("\nuser orders (JOIN):")
+	for _, row := range res.Rows {
+		fmt.Println(rowStr(row))
+	}
+	fmt.Printf("(%d rows)\n", len(res.Rows))
+
+	// LEFT JOIN: all users including those with no orders.
+	res, err = db.Exec(`SELECT users.name, orders.total FROM users LEFT JOIN orders ON users.id == orders.user_id;`)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("\nall users with orders (LEFT JOIN):")
+	for _, row := range res.Rows {
+		fmt.Println(rowStr(row))
+	}
+	fmt.Printf("(%d rows)\n", len(res.Rows))
 }
 
 // rowStr formats a record as "col=val col=val ..."

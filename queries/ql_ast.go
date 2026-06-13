@@ -1,6 +1,26 @@
 package queries
 
 // ---------------------------------------------------------------------------
+// Join types
+// ---------------------------------------------------------------------------
+
+// JoinType discriminates the kind of JOIN.
+type JoinType uint8
+
+const (
+	JoinInner JoinType = iota
+	JoinLeft
+)
+
+// TableRef describes one table reference in a FROM/JOIN clause.
+type TableRef struct {
+	Name     string
+	Alias    string
+	JoinType JoinType
+	OnExpr   *Expr // nil for the first (leftmost) table
+}
+
+// ---------------------------------------------------------------------------
 // Token kinds
 // ---------------------------------------------------------------------------
 
@@ -89,8 +109,9 @@ type IndexDef struct {
 type Statement struct {
 	Kind StmtKind
 
-	// Table name (all statements).
-	Table string
+	// Table references (all statements). The first entry is the primary
+	// table; subsequent entries come from JOIN clauses.
+	Tables []TableRef
 
 	// SELECT: column list ("*" expands to all columns).
 	Cols []string
@@ -115,6 +136,15 @@ type Statement struct {
 	ColDefs []ColDef
 	PKeys   int // number of leading columns that form the primary key
 	Indexes []IndexDef
+}
+
+// Table returns the first table name (convenience for single-table
+// statements).
+func (s Statement) Table() string {
+	if len(s.Tables) > 0 {
+		return s.Tables[0].Name
+	}
+	return ""
 }
 
 // Assign is one "col = expr" pair used in INSERT and UPDATE.
